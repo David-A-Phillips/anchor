@@ -1,5 +1,6 @@
 //! Command-line interface (`anchor <command>`).
 
+pub mod compare;
 pub mod eval;
 pub mod fetch;
 
@@ -113,6 +114,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Compare Anchor with plain retrieval and with other RAG systems on the same questions.
+    Compare {
+        /// Working directory: `questions.jsonl` and `results/<system>.jsonl`.
+        dir: PathBuf,
+        /// Ground truth to (re)generate the questions and Anchor's results from. Without it,
+        /// only the results already in the directory are scored.
+        #[arg(long)]
+        truth: Option<PathBuf>,
+        /// Print the scores as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export a GitHub repository's issues, discussions and pull-request reviews (needs `gh`).
     Fetch {
         /// `owner/name` of the repository; omit to refresh every `[[github]]` entry.
@@ -149,6 +162,8 @@ enum Command {
         /// The pack file.
         file: PathBuf,
     },
+    /// Serve the Model Context Protocol on stdio, for agent hosts such as Claude Code.
+    Mcp,
     /// Run the central sync server (WebSocket and gRPC on `sync.listen`).
     Server,
     /// Synchronise once with the configured sync server and print the result.
@@ -651,6 +666,14 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let applied = tokio::task::spawn_blocking(move || engine.import_pack(&file)).await??;
             println!("Applied {applied} unit versions.");
         }
+        Command::Mcp => {
+            let (config, _) = load_config(&cli.config)?;
+            let engine = open_engine(config).await?;
+            install_remote(&engine)?;
+            let server = crate::mcp::McpServer::new(engine.clone(), query_engine(&engine));
+            server.serve_stdio().await?;
+            engine.flush()?;
+        }
         Command::Server => {
             let (config, _) = load_config(&cli.config)?;
             let listen = config.sync.listen.clone();
@@ -843,6 +866,22 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", eval::render(&report));
             }
             engine.flush()?;
+        }
+        Command::Compare { dir, truth, json } => {
+            if let Some(truth) = truth {
+                let (config, _) = load_config(&cli.config)?;
+                let truth: crate::synth::GroundTruth =
+                    serde_json::from_str(&std::fs::read_to_string(&truth)?)?;
+                let engine = open_engine(config).await?;
+                compare::export(&engine, &query_engine(&engine), &truth, &dir).await?;
+                engine.flush()?;
+            }
+            let board = compare::score_dir(&dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&board)?);
+            } else {
+                print!("{}", compare::render(&board));
+            }
         }
         Command::Enrich { limit } => {
             let (config, _) = load_config(&cli.config)?;

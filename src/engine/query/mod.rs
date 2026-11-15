@@ -180,6 +180,26 @@ pub struct ContextItem {
     pub path: Vec<PathStep>,
 }
 
+impl ContextItem {
+    /// The evidence path as text, e.g. `service:a <-owns- team:b`; empty when the node was
+    /// found directly.
+    pub fn path_text(&self) -> String {
+        let Some(first) = self.path.first() else {
+            return String::new();
+        };
+        let mut out = first.from.key.clone();
+        for step in &self.path {
+            if step.direction == Direction::Reverse {
+                out.push_str(&format!(" <-{}- ", step.edge));
+            } else {
+                out.push_str(&format!(" -{}-> ", step.edge));
+            }
+            out.push_str(&step.to.key);
+        }
+        out
+    }
+}
+
 /// An authoritative claim overriding less trusted ones.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Conflict {

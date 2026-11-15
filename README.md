@@ -120,7 +120,9 @@ The exact accepted formats are documented at the top of each parser module under
 | `anchor spend [--days N]` | Token usage and estimated cost, local vs. cloud |
 | `anchor backlog` | Open gap-analysis items |
 | `anchor enrich [--limit N]` | Summarise and tag pages, tickets, PRs and APIs with the local model |
+| `anchor mcp` | Serve the Model Context Protocol on stdio, for agents (Claude Code, Cursor, …) |
 | `anchor eval --truth FILE` | Score the engine against questions with known answers |
+| `anchor compare DIR [--truth FILE]` | Score Anchor next to plain retrieval and other RAG systems |
 | `anchor fetch OWNER/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
 | `anchor deepen SOURCE [--depth map\|full]` | Ingest a source more deeply |
 | `anchor export [-o FILE]` / `anchor import FILE` | Write or merge a signed `.contextpack` |
@@ -150,6 +152,40 @@ JSON API: `/api/health`, `/api/stats`, `/api/graph/search?q=`, `/api/graph/node/
 `/api/graph/path?from=&to=`, `/api/graph/hierarchy`, `POST /api/query`, `/api/backlog`,
 `POST /api/backlog/{id}/{resolve|dismiss|reopen|retry}`, `/api/spend?days=`,
 `POST /api/sources/{id}/rescan`, `POST /api/export`.
+
+## Using Anchor from an agent (MCP)
+
+`anchor mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio,
+the interface agent hosts such as Claude Code, Claude Desktop and Cursor speak. It opens the same
+database as the CLI and the daemon, and can run alongside the daemon.
+
+Claude Code:
+
+```sh
+claude mcp add anchor -- anchor mcp
+# or with an explicit configuration file
+claude mcp add anchor -- anchor --config /path/to/anchor.toml mcp
+```
+
+Any other host, in its MCP server configuration:
+
+```json
+{ "mcpServers": { "anchor": { "command": "anchor", "args": ["mcp"] } } }
+```
+
+| Tool | Purpose |
+|------|---------|
+| `ask` | A question in; the answer (when the graph holds one), evidence with trust levels and the path that led to it, resolved conflicts, gaps and shallow sources out. No model call unless `explain` is set |
+| `search` | Find entities by name or alias, optionally of one kind |
+| `get` | One entity: attributes, asserting sources, relationships, text |
+| `path` | The most trustworthy chain of relationships between two entities |
+| `deepen` | Ingest a shallow source more deeply; call it when `ask` lists the source under `shallow`, then ask again |
+| `status` | Sources with their kind, trust and depth; entity counts |
+
+Entities are addressed by key (`service:billing-api`, as returned by `ask` and `search`) or by
+name. Tool failures come back as tool errors (`isError`), so the agent can correct itself.
+Protocol revisions 2024-11-05, 2025-03-26 and 2025-06-18 are supported. For hosts that do not
+speak MCP, `anchor query --json` and the dashboard's `POST /api/query` return the same data.
 
 ## Client/server sync
 

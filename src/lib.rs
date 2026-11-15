@@ -23,6 +23,7 @@ pub mod base;
 pub mod cli;
 pub mod config;
 pub mod engine;
+pub mod mcp;
 pub mod metrics;
 pub mod ollama;
 pub mod schema;
