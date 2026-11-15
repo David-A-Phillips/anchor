@@ -11,6 +11,7 @@
 //! * [`engine`] — parsing, ingestion, the graph store and in-memory graph, embeddings, tiered model
 //!   routing, the file watcher and the query engine;
 //! * [`sync`] — Merkle trees, `.contextpack` manifests and the client/server protocol;
+//! * [`synth`] — the deterministic synthetic enterprise generator behind `anchor demo`;
 //! * [`backlog`] — the gap-analysis backlog and its background worker;
 //! * [`metrics`] — the token ledger and resource monitoring;
 //! * [`web`] — the embedded dashboard;
@@ -26,6 +27,7 @@ pub mod metrics;
 pub mod ollama;
 pub mod schema;
 pub mod sync;
+pub mod synth;
 pub mod web;
 
 pub use crate::base::{Error, Result};

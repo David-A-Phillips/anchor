@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::base::{Error, Result, SourceId};
 use crate::config::provision::{
@@ -83,11 +83,35 @@ enum Command {
         /// The pack file.
         file: PathBuf,
     },
+    /// Generate a synthetic enterprise (repos, org, wiki, portal, Jira, reviews) to try Anchor
+    /// without connecting real systems.
+    Demo {
+        /// Directory to write the dataset into.
+        #[arg(long)]
+        out: PathBuf,
+        /// Size of the dataset.
+        #[arg(long, value_enum, default_value_t = DemoScale::Small)]
+        scale: DemoScale,
+        /// Seed: the same seed always yields the same dataset.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
     /// Manage the local Ollama backend.
     Ollama {
         #[command(subcommand)]
         action: OllamaAction,
     },
+}
+
+/// Sizes of the `demo` dataset.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DemoScale {
+    /// 8 repositories.
+    Tiny,
+    /// 24 repositories.
+    Small,
+    /// 100 repositories.
+    Medium,
 }
 
 #[derive(Debug, Subcommand)]
@@ -396,6 +420,46 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let engine = open_engine(config).await?;
             let applied = tokio::task::spawn_blocking(move || engine.import_pack(&file)).await??;
             println!("Applied {applied} unit versions.");
+        }
+        Command::Demo { out, scale, seed } => {
+            let preset = match scale {
+                DemoScale::Tiny => crate::synth::Preset::Tiny,
+                DemoScale::Small => crate::synth::Preset::Small,
+                DemoScale::Medium => crate::synth::Preset::Medium,
+            };
+            let spec = crate::synth::SynthSpec::preset(preset).seed(seed);
+            let target = out.clone();
+            let report =
+                tokio::task::spawn_blocking(move || crate::synth::generate(&spec, &target))
+                    .await??;
+            println!(
+                "Generated {} repositories ({} source files), {} wiki pages, {} issues, {} pull requests and {} questions ({:.1} MB) in {}.",
+                report.repositories,
+                report.source_files,
+                report.wiki_pages,
+                report.tickets,
+                report.pull_requests,
+                report.total_questions(),
+                report.total_bytes() as f64 / 1e6,
+                out.display()
+            );
+            let config = out.join("anchor.toml");
+            println!("\nIngest it (no model or network needed):");
+            println!("  anchor --config {} ingest", config.display());
+            let example = std::fs::read_to_string(out.join("ground_truth.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<crate::synth::GroundTruth>(&text).ok())
+                .and_then(|truth| truth.ownership.first().map(|q| q.question.clone()))
+                .unwrap_or_else(|| "Who owns the payments-api service?".to_owned());
+            println!("Then ask:");
+            println!(
+                "  anchor --config {} query \"{example}\" --retrieval-only",
+                config.display()
+            );
+            println!(
+                "Questions with known answers are in {}.",
+                out.join("ground_truth.json").display()
+            );
         }
         Command::Ollama { action } => {
             let (mut config, path) = load_config(&cli.config)?;
