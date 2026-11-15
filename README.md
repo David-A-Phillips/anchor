@@ -178,7 +178,38 @@ down, rebuilds and verifies again.
 `scripts/fetch-corpus.sh` fetches a real-world corpus (Linux, Kubernetes, Grafana, exported pull-
 request reviews) into `./corpus` for scale testing.
 
+## Database size
+
+Size follows code volume, not repository count. Measured on the Kubernetes repository (32k files,
+364k symbols, 1.15M edges): 1.5 GB database, 4 minutes to ingest, under 1 GB of memory. A typical
+40-file service is about 1 MB. Options that trade detail for size:
+
+```toml
+[parser]
+call_graph = true                    # false: files and symbols only, no call/reference/import edges
+keep_unresolved_references = false   # true: keep calls into code outside the graph for later linking
+
+[embeddings]
+embed_code = false                   # true: also embed code previews, not only docs and comments
+```
+
+## Measured retrieval quality
+
+`cargo test --all-features --test e2e -- --nocapture` scores 166 generated questions with known
+answers. Current results: ownership questions ("Who owns API X?") recall 0.99 and top-answer
+accuracy 0.94, with stale reference-only claims never winning. Justification questions ("Why is
+this blocking?") are weaker: 1.0 recall for blocked APIs and endpoints, 0.5 for blocked tickets,
+and near zero for pull-request questions. Multi-hop relationship questions reach 0.37.
+
 ## Known limitations
+
+- Questions about a specific pull request, and multi-hop relationship questions ("who leads the
+  team that owns the component containing X"), are not yet understood by the heuristic classifier
+  and retrieve poorly without a language model.
+- Context precision is low (about 0.2 for ownership): the context includes neighbouring evidence
+  beyond the answer.
+- One provisioning test (`a_system_binary_is_preferred_over_downloading`) failed once in a full
+  parallel run and passed on every re-run; it is probably a port race in the test fakes.
 
 - Two graph nodes that already exist are not merged retroactively when a later source reveals
   they are the same entity; `GraphStore::rebuild` re-materialises the graph and heals this.
