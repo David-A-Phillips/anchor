@@ -75,8 +75,9 @@ CREATE TABLE edges (
 );
 CREATE INDEX edges_to ON edges(to_id);
 CREATE TABLE refs (
-    id INTEGER PRIMARY KEY, body TEXT NOT NULL UNIQUE, text TEXT NOT NULL
+    id INTEGER PRIMARY KEY, digest INTEGER NOT NULL, body TEXT NOT NULL, text TEXT NOT NULL
 );
+CREATE INDEX refs_digest ON refs(digest);
 CREATE INDEX refs_text ON refs(text);
 CREATE TABLE edge_claims (
     id INTEGER PRIMARY KEY, unit_id INTEGER NOT NULL, from_ref INTEGER NOT NULL,
@@ -638,10 +639,17 @@ fn refresh_node(tx: &Connection, touched: &mut Touched, node: i64) -> Result<()>
         .query_row([node], |row| row.get(0))?;
     tx.prepare_cached("INSERT INTO nodes_fts(nodes_fts, rowid, name) VALUES ('delete', ?1, ?2)")?
         .execute(params![node, old_name])?;
+    // A node asserted by a single unit keeps its attributes only in that claim; the merged copy
+    // is stored just for nodes with several claims.
+    let stored_attrs = if claims.len() == 1 {
+        "{}".to_owned()
+    } else {
+        json(&attrs)?
+    };
     tx.prepare_cached(
         "UPDATE nodes SET key = ?2, name = ?3, attrs = ?4, trust = ?5, source = ?6, path = ?7 WHERE id = ?1",
     )?
-    .execute(params![node, primary, first.name, json(&attrs)?, first.trust, first.source, path])?;
+    .execute(params![node, primary, first.name, stored_attrs, first.trust, first.source, path])?;
     tx.prepare_cached("INSERT INTO nodes_fts(rowid, name) VALUES (?1, ?2)")?
         .execute(params![node, first.name])?;
     for key in &all_keys {
@@ -971,15 +979,20 @@ fn write_unit(
 /// Interns an endpoint reference: claims store a small integer instead of repeating the JSON.
 fn intern_ref(tx: &Connection, reference: &NodeRef) -> Result<i64> {
     let body = json(reference)?;
+    // Looked up through a 64-bit digest so the index does not hold a second copy of every body.
+    let hash = blake3::hash(body.as_bytes());
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&hash.as_bytes()[..8]);
+    let digest = i64::from_le_bytes(first);
     if let Some(id) = tx
-        .prepare_cached("SELECT id FROM refs WHERE body = ?1")?
-        .query_row([&body], |row| row.get(0))
+        .prepare_cached("SELECT id FROM refs WHERE digest = ?1 AND body = ?2")?
+        .query_row(params![digest, body], |row| row.get(0))
         .optional()?
     {
         return Ok(id);
     }
-    tx.prepare_cached("INSERT INTO refs (body, text) VALUES (?1, ?2)")?
-        .execute(params![body, normalized_text(reference)])?;
+    tx.prepare_cached("INSERT INTO refs (digest, body, text) VALUES (?1, ?2, ?3)")?
+        .execute(params![digest, body, normalized_text(reference)])?;
     Ok(tx.last_insert_rowid())
 }
 
@@ -1372,7 +1385,14 @@ impl GraphStore {
 
     fn node_record(conn: &Connection, id: i64) -> Result<Option<NodeRecord>> {
         let row: Option<(String, i64, String, String, i64)> = conn
-            .prepare_cached("SELECT key, kind, name, attrs, trust FROM nodes WHERE id = ?1")?
+            .prepare_cached(
+                "SELECT key, kind, name,
+                        CASE WHEN attrs = '{}' THEN COALESCE(
+                            (SELECT c.attrs FROM node_claims c WHERE c.node_id = nodes.id LIMIT 1), '{}')
+                        ELSE attrs END,
+                        trust
+                 FROM nodes WHERE id = ?1",
+            )?
             .query_row([id], |row| {
                 Ok((
                     row.get(0)?,
