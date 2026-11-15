@@ -149,3 +149,7 @@ strip = "debuginfo"
 
 [profile.bench]
 inherits = "release"
+
+[[bench]]
+name = "engine"
+harness = false
