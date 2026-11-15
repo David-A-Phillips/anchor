@@ -15,7 +15,7 @@ fn engine(dir: &std::path::Path, depth: Depth, policy: ShallowPolicy) -> Arc<Eng
     std::fs::write(repo.join("CODEOWNERS"), "* @acme/payments-platform\n").unwrap();
     std::fs::write(
         repo.join("src/lib.rs"),
-        "/// Charges a card.\npub fn charge(amount: u64) -> u64 { validate(amount) }\nfn validate(amount: u64) -> u64 { amount }\n",
+        "/// A ledger.\npub struct Ledger;\n/// Charges a card.\npub fn charge(amount: u64) -> u64 { validate(amount) }\nfn validate(amount: u64) -> u64 { amount }\n",
     )
     .unwrap();
     let mut config = AnchorConfig {
@@ -60,10 +60,11 @@ fn each_depth_ingests_more_than_the_one_above() {
             (stats.node_count, stats.edge_count)
         })
         .collect();
-    // Phone book: the service and its owner. Map: plus files and symbols. Full: plus calls.
+    // Phone book: the service and its owner. Map: plus files and public types. Full: plus
+    // functions, private items and calls.
     assert_eq!(counts[0], (2, 1));
-    assert!(counts[1].0 > counts[0].0);
-    assert_eq!(counts[2].0, counts[1].0);
+    assert!(counts[1].0 > counts[0].0, "{counts:?}");
+    assert!(counts[2].0 > counts[1].0, "{counts:?}");
     assert!(counts[2].1 > counts[1].1, "{counts:?}");
 }
 
@@ -144,7 +145,7 @@ async fn background_policy_answers_now_and_deepens_behind() {
         .unwrap();
     assert_eq!(response.shallow[0].status, "deepening");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while engine.store().stats().unwrap().node_count < 4 {
+    while engine.store().stats().unwrap().node_count < 5 {
         assert!(
             std::time::Instant::now() < deadline,
             "background deepening never finished"
@@ -179,8 +180,10 @@ async fn depth_trades_footprint_for_recall() {
 
     let data = tempfile::tempdir().unwrap();
     generate(&SynthSpec::preset(Preset::Small).seed(2024), data.path()).unwrap();
-    let truth: GroundTruth =
-        serde_json::from_str(&std::fs::read_to_string(data.path().join("ground_truth.json")).unwrap()).unwrap();
+    let truth: GroundTruth = serde_json::from_str(
+        &std::fs::read_to_string(data.path().join("ground_truth.json")).unwrap(),
+    )
+    .unwrap();
 
     let mut rows = Vec::new();
     for depth in [Depth::PhoneBook, Depth::Map, Depth::Full] {
@@ -202,9 +205,30 @@ async fn depth_trades_footprint_for_recall() {
         let mut flagged = 0usize;
         let mut asked = 0usize;
         let groups: [(&str, Vec<(String, Vec<String>)>); 3] = [
-            ("ownership", truth.ownership.iter().map(|q| (q.question.clone(), q.expected_owner_keys.clone())).collect()),
-            ("justification", truth.justification.iter().map(|q| (q.question.clone(), q.expected_keys.clone())).collect()),
-            ("relationships", truth.relationships.iter().map(|q| (q.question.clone(), q.expected_keys.clone())).collect()),
+            (
+                "ownership",
+                truth
+                    .ownership
+                    .iter()
+                    .map(|q| (q.question.clone(), q.expected_owner_keys.clone()))
+                    .collect(),
+            ),
+            (
+                "justification",
+                truth
+                    .justification
+                    .iter()
+                    .map(|q| (q.question.clone(), q.expected_keys.clone()))
+                    .collect(),
+            ),
+            (
+                "relationships",
+                truth
+                    .relationships
+                    .iter()
+                    .map(|q| (q.question.clone(), q.expected_keys.clone()))
+                    .collect(),
+            ),
         ];
         for (name, questions) in groups {
             let (mut found, mut expected) = (0usize, 0usize);
@@ -217,7 +241,13 @@ async fn depth_trades_footprint_for_recall() {
                 expected += keys.len();
                 found += keys
                     .iter()
-                    .filter(|key| response.context.items.iter().any(|item| &&item.node.key == key))
+                    .filter(|key| {
+                        response
+                            .context
+                            .items
+                            .iter()
+                            .any(|item| &&item.node.key == key)
+                    })
                     .count();
             }
             recall.push((name, found as f64 / expected.max(1) as f64));
@@ -244,5 +274,9 @@ async fn depth_trades_footprint_for_recall() {
     // Every answer from a shallow graph says so.
     assert_eq!(rows[0].2, rows[0].3);
     // Ownership is a phone-book question: it must already work at the top level.
-    assert!(rows[0].1 > 0.5, "ownership recall at phone-book depth: {}", rows[0].1);
+    assert!(
+        rows[0].1 > 0.5,
+        "ownership recall at phone-book depth: {}",
+        rows[0].1
+    );
 }

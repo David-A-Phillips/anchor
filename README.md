@@ -187,7 +187,7 @@ phone-book depth and go deep only where they work.
 | Depth | What is ingested |
 |-------|------------------|
 | `phone_book` | Repositories: the service and its owners only. Org model and API portal: everything (they are the phone book). Wikis, Jira and reviews: nothing. |
-| `map` | Plus files, symbols with signatures and doc comments, and document text. No call graph, no code previews. |
+| `map` | Plus files, public types (structs, classes, interfaces, traits, enums, modules) with their doc comments, and document text. No functions or methods, no private items, no call graph, no code previews. |
 | `full` | Everything (the default). |
 
 ```toml

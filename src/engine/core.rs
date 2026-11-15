@@ -718,6 +718,38 @@ impl Engine {
             });
             unit.chunks
                 .retain(|chunk| chunk.kind != crate::base::ChunkKind::Code);
+            // Keep the outline someone outside the file would look for: public types. Functions,
+            // methods and private items appear when the source is deepened.
+            let dropped: std::collections::HashSet<_> = unit
+                .nodes
+                .iter()
+                .filter(|node| {
+                    let attr = |name: &str| node.attrs.get(name).and_then(|v| v.as_str());
+                    let outline = matches!(
+                        attr(attrs::SYMBOL_KIND),
+                        Some(
+                            "struct"
+                                | "enum"
+                                | "trait"
+                                | "interface"
+                                | "class"
+                                | "module"
+                                | "type_alias"
+                                | "union"
+                        )
+                    );
+                    node.kind == NodeKind::Symbol
+                        && !(outline && attr(attrs::VISIBILITY) == Some("public"))
+                })
+                .map(|node| node.key.clone())
+                .collect();
+            if !dropped.is_empty() {
+                let gone = |reference: &crate::base::NodeRef| matches!(reference, crate::base::NodeRef::Key(key) if dropped.contains(key));
+                unit.nodes.retain(|node| !dropped.contains(&node.key));
+                unit.edges
+                    .retain(|edge| !gone(&edge.from) && !gone(&edge.to));
+                unit.chunks.retain(|chunk| !dropped.contains(&chunk.node));
+            }
         }
         if let Some(rules) = rules {
             let file_key = keys::file(id, rel);
