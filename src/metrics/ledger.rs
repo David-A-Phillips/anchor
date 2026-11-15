@@ -19,7 +19,7 @@ use rusqlite::{Row, params};
 use serde::{Deserialize, Serialize};
 
 use crate::base::{
-    CallPurpose, Db, Error, Locality, ModelTier, Result, TokenUsage, UsageRecord, UsageSink, now_ms,
+    CallPurpose, Db, Error, Locality, ModelTier, Result, UsageRecord, UsageSink, now_ms,
 };
 
 use super::pricing::{PriceTable, nanos_to_usd};
@@ -791,6 +791,7 @@ impl Accumulator {
 mod tests {
     use super::*;
     use crate::base::MigrationSet;
+    use crate::base::TokenUsage;
     use crate::metrics::{MetricsConfig, ModelPrice};
 
     const SCHEMA: &[MigrationSet] = &[MigrationSet {

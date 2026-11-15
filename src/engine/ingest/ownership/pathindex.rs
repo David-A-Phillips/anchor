@@ -21,11 +21,20 @@ enum Verify {
 }
 
 /// Builder for a [`PathIndex`].
-#[derive(Default)]
 pub(super) struct PathIndexBuilder {
     buckets: HashMap<String, Vec<(Verify, u32)>>,
     floating: GlobSetBuilder,
     floating_ids: Vec<u32>,
+}
+
+impl Default for PathIndexBuilder {
+    fn default() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            floating: GlobSetBuilder::new(),
+            floating_ids: Vec::new(),
+        }
+    }
 }
 
 /// Compiled glob set; see the module documentation.

@@ -63,7 +63,10 @@ impl AnchorConfig {
     /// Reads the configuration at `path` and reports the keys of the file Anchor does not know.
     pub fn load_with_report(path: &Path) -> Result<LoadedConfig> {
         let text = std::fs::read_to_string(path).map_err(|err| {
-            Error::config(format!("cannot read configuration {}: {err}", path.display()))
+            Error::config(format!(
+                "cannot read configuration {}: {err}",
+                path.display()
+            ))
         })?;
         let config = Self::from_toml_str(&text)
             .map_err(|err| Error::config(format!("{}: {err}", path.display())))?;
@@ -145,6 +148,9 @@ fn schema_exemplar() -> AnchorConfig {
         model: String::new(),
         input_usd_per_mtok: 0.0,
         output_usd_per_mtok: 0.0,
+        long_prompt_threshold_tokens: None,
+        long_input_usd_per_mtok: None,
+        long_output_usd_per_mtok: None,
     }];
     let mut source = SourceConfig::new("x", SourceKind::Repo, "/");
     source.name = Some(String::new());
@@ -380,7 +386,12 @@ mod tests {
             .collect();
         assert_eq!(
             paths,
-            ["colour", "models.system2.flavour", "sources[1].colour", "web.prot"]
+            [
+                "colour",
+                "models.system2.flavour",
+                "sources[1].colour",
+                "web.prot"
+            ]
         );
         // The default configuration and the exemplar themselves are fully known.
         let default_text = AnchorConfig::default().to_toml_string().expect("toml");
@@ -389,9 +400,15 @@ mod tests {
 
     #[test]
     fn defaults_follow_the_injected_environment() {
-        let both = env(&[("ANCHOR_HOME", "/srv/anchor"), ("ANCHOR_CONFIG", "/etc/a.toml")]);
+        let both = env(&[
+            ("ANCHOR_HOME", "/srv/anchor"),
+            ("ANCHOR_CONFIG", "/etc/a.toml"),
+        ]);
         assert_eq!(default_data_dir_with(&both), PathBuf::from("/srv/anchor"));
-        assert_eq!(default_config_path_with(&both), PathBuf::from("/etc/a.toml"));
+        assert_eq!(
+            default_config_path_with(&both),
+            PathBuf::from("/etc/a.toml")
+        );
         let home = env(&[("ANCHOR_HOME", "/srv/anchor"), ("ANCHOR_CONFIG", "")]);
         assert_eq!(
             default_config_path_with(&home),

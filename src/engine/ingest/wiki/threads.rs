@@ -93,7 +93,9 @@ pub(super) fn person(value: Option<&Value>) -> PersonIdentity {
             let email = field(value, &["email"]);
             PersonIdentity::new(
                 name.as_deref(),
-                handle.as_deref().map(|handle| handle.trim_start_matches('@')),
+                handle
+                    .as_deref()
+                    .map(|handle| handle.trim_start_matches('@')),
                 email.as_deref(),
             )
         }
@@ -108,8 +110,8 @@ pub(super) fn parse_sidecar(
     bytes: &[u8],
     problems: &mut Vec<String>,
 ) -> Result<Vec<RawThread>, String> {
-    let document: Value =
-        serde_json::from_slice(bytes).map_err(|error| format!("malformed comments JSON: {error}"))?;
+    let document: Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("malformed comments JSON: {error}"))?;
     let entries = match &document {
         Value::Array(entries) => entries,
         Value::Object(map) => match map.get("threads") {
@@ -162,7 +164,10 @@ pub(super) fn parse_sidecar(
 }
 
 fn has_class(element: &ElementRef<'_>, class: &str) -> bool {
-    element.value().classes().any(|candidate| candidate == class)
+    element
+        .value()
+        .classes()
+        .any(|candidate| candidate == class)
 }
 
 /// `true` for an embedded thread container (`class="comment-thread"`).
@@ -215,9 +220,14 @@ fn own_text(element: ElementRef<'_>, class: &str) -> Option<String> {
 
 fn is_comment_metadata(element: &ElementRef<'_>) -> bool {
     element.value().name() == "time"
-        || ["comment-author", "comment-date", "comment-meta", "close-reason"]
-            .iter()
-            .any(|class| has_class(element, class))
+        || [
+            "comment-author",
+            "comment-date",
+            "comment-meta",
+            "close-reason",
+        ]
+        .iter()
+        .any(|class| has_class(element, class))
 }
 
 fn html_comment(element: ElementRef<'_>, parent: Option<usize>) -> RawComment {

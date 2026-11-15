@@ -545,10 +545,7 @@ fn parse_html(content: &str) -> ParsedPage {
             &["page-id", "id", "ajs-page-id", "confluence-page-id"],
         ),
         title: field(&metas, &["title", "ajs-page-title", "og:title", "dc.title"]),
-        parent: field(
-            &metas,
-            &["parent", "parent-title", "ajs-parent-page-title"],
-        ),
+        parent: field(&metas, &["parent", "parent-title", "ajs-parent-page-title"]),
         parent_id: field(&metas, &["parent-id", "ajs-parent-page-id"]),
         labels: list_field(&metas, &["labels", "keywords", "tags", "ajs-labels"]),
         author: person(
@@ -872,7 +869,9 @@ fn add_thread(
         )
     });
     if !seen_threads.insert(thread_id.clone()) {
-        problems.push(format!("duplicate thread id {thread_id:?}; later copy skipped"));
+        problems.push(format!(
+            "duplicate thread id {thread_id:?}; later copy skipped"
+        ));
         return;
     }
     let (status, known) = normalize_status(thread.status.as_deref());

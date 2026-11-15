@@ -106,14 +106,31 @@ fn markdown_page_with_front_matter_and_sidecar() {
     assert_eq!(page.attrs[attrs::URL], "https://wiki.example.com/x/123");
     assert_eq!(page.attrs[attrs::VERSION], "7");
     assert_eq!(page.attrs[ATTR_SPACE], "ENG");
-    assert_eq!(page.attrs[attrs::LABELS], serde_json::json!(["payments", "oncall"]));
+    assert_eq!(
+        page.attrs[attrs::LABELS],
+        serde_json::json!(["payments", "oncall"])
+    );
     assert_eq!(page.attrs[attrs::CREATED_AT], 1_709_251_200_000_i64);
     assert_eq!(page.attrs[attrs::UPDATED_AT], 1_715_963_400_000_i64);
 
     // Hierarchy, author.
-    assert!(has_key_edge(unit, "wiki:eng-wiki:operations", EdgeKind::Contains, page_key));
-    assert!(has_key_edge(unit, page_key, EdgeKind::AuthoredBy, "person:alice"));
-    assert!(node(unit, "person:alice").aliases.contains(&"Alice Smith".to_owned()));
+    assert!(has_key_edge(
+        unit,
+        "wiki:eng-wiki:operations",
+        EdgeKind::Contains,
+        page_key
+    ));
+    assert!(has_key_edge(
+        unit,
+        page_key,
+        EdgeKind::AuthoredBy,
+        "person:alice"
+    ));
+    assert!(
+        node(unit, "person:alice")
+            .aliases
+            .contains(&"Alice Smith".to_owned())
+    );
 
     // Page text: section chunks with heading paths, no front matter.
     let texts: Vec<&str> = unit
@@ -131,11 +148,26 @@ fn markdown_page_with_front_matter_and_sidecar() {
     let mentions = EdgeKind::Mentions;
     assert!(lookup_weight(unit, page_key, mentions, "Ledger::charge").is_some());
     assert!(lookup_weight(unit, page_key, mentions, "PAY-123").is_some());
-    assert_eq!(lookup_weight(unit, page_key, mentions, "ops/escalation"), Some(0.9));
-    assert_eq!(lookup_weight(unit, page_key, mentions, "Incident Process"), Some(0.9));
+    assert_eq!(
+        lookup_weight(unit, page_key, mentions, "ops/escalation"),
+        Some(0.9)
+    );
+    assert_eq!(
+        lookup_weight(unit, page_key, mentions, "Incident Process"),
+        Some(0.9)
+    );
     let documents = EdgeKind::Documents;
-    for name in ["payments-api", "POST /v1/charges", "Payments API Runbook", "Payments API"] {
-        assert_eq!(lookup_weight(unit, page_key, documents, name), Some(0.8), "{name}");
+    for name in [
+        "payments-api",
+        "POST /v1/charges",
+        "Payments API Runbook",
+        "Payments API",
+    ] {
+        assert_eq!(
+            lookup_weight(unit, page_key, documents, name),
+            Some(0.8),
+            "{name}"
+        );
     }
 
     // Resolved inline thread with closer, reason and replies.
@@ -143,7 +175,10 @@ fn markdown_page_with_front_matter_and_sidecar() {
     let thread = node(unit, t1);
     assert_eq!(thread.attrs[attrs::THREAD_STATUS], attrs::THREAD_RESOLVED);
     assert_eq!(thread.attrs[attrs::THREAD_KIND], "inline");
-    assert_eq!(thread.attrs[attrs::ANCHOR_TEXT], "Retries use `retry_charge`");
+    assert_eq!(
+        thread.attrs[attrs::ANCHOR_TEXT],
+        "Retries use `retry_charge`"
+    );
     assert_eq!(thread.attrs[attrs::CLOSED_BY], "Bob Lee");
     assert_eq!(thread.attrs[attrs::CLOSE_REASON], "Documented the backoff");
     assert_eq!(thread.attrs[attrs::CREATED_AT], 1_714_554_000_000_i64);
@@ -181,7 +216,10 @@ fn markdown_page_with_front_matter_and_sidecar() {
     // Dismissed review thread (numeric id) keeps who dismissed it and why.
     let t2 = "thread:eng-wiki:payments-runbook/2";
     let dismissed = node(unit, t2);
-    assert_eq!(dismissed.attrs[attrs::THREAD_STATUS], attrs::THREAD_DISMISSED);
+    assert_eq!(
+        dismissed.attrs[attrs::THREAD_STATUS],
+        attrs::THREAD_DISMISSED
+    );
     assert_eq!(dismissed.attrs[attrs::THREAD_KIND], "review");
     assert_eq!(dismissed.attrs[attrs::CLOSED_BY], "Bob Lee");
     assert_eq!(
@@ -193,19 +231,32 @@ fn markdown_page_with_front_matter_and_sidecar() {
     let generated: Vec<&NodeAssertion> = unit
         .nodes
         .iter()
-        .filter(|n| n.kind == NodeKind::Thread && n.key.as_str().contains("/t-") && n.key.as_str() != t1)
+        .filter(|n| {
+            n.kind == NodeKind::Thread && n.key.as_str().contains("/t-") && n.key.as_str() != t1
+        })
         .collect();
     assert_eq!(generated.len(), 1);
     assert_eq!(generated[0].attrs[attrs::THREAD_STATUS], attrs::THREAD_OPEN);
     assert_eq!(generated[0].attrs[attrs::THREAD_KIND], "page");
-    assert_eq!(unit.nodes.iter().filter(|n| n.kind == NodeKind::Comment).count(), 5);
+    assert_eq!(
+        unit.nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Comment)
+            .count(),
+        5
+    );
 
     let warnings: Vec<&str> = output.warnings.iter().map(|w| w.message.as_str()).collect();
     assert_eq!(warnings.len(), 3, "{warnings:?}");
     assert!(warnings.iter().any(|w| w.contains("not an object")));
     assert!(warnings.iter().any(|w| w.contains("unknown status")));
     assert!(warnings.iter().any(|w| w.contains("c-404")));
-    assert!(output.warnings.iter().all(|w| w.location == "guides/runbook.md"));
+    assert!(
+        output
+            .warnings
+            .iter()
+            .all(|w| w.location == "guides/runbook.md")
+    );
 }
 
 const LEDGER_HTML: &str = r#"<!DOCTYPE html>
@@ -250,11 +301,22 @@ fn html_page_with_meta_tags_and_embedded_nested_threads() {
     let page_key = "wiki:eng-wiki:4711";
     let page = node(unit, page_key);
     assert_eq!(page.name, "Ledger Design");
-    assert_eq!(page.attrs[attrs::URL], "https://wiki.example.com/pages/4711");
-    assert_eq!(page.attrs[attrs::LABELS], serde_json::json!(["ledger", "design"]));
+    assert_eq!(
+        page.attrs[attrs::URL],
+        "https://wiki.example.com/pages/4711"
+    );
+    assert_eq!(
+        page.attrs[attrs::LABELS],
+        serde_json::json!(["ledger", "design"])
+    );
     assert_eq!(page.attrs[attrs::UPDATED_AT], 1_717_243_200_000_i64);
     assert!(page.aliases.contains(&"arch/ledger".to_owned()));
-    assert!(has_key_edge(unit, page_key, EdgeKind::AuthoredBy, "person:zoë-ångström"));
+    assert!(has_key_edge(
+        unit,
+        page_key,
+        EdgeKind::AuthoredBy,
+        "person:zoë-ångström"
+    ));
     assert!(unit.edges.iter().any(|edge| edge.kind == EdgeKind::Contains
         && edge.to == NodeRef::Key(NodeKey::new(page_key))
         && matches!(&edge.from, NodeRef::Lookup(l) if l.text == "Architecture" && l.kinds == [NodeKind::WikiPage])));
@@ -275,9 +337,15 @@ fn html_page_with_meta_tags_and_embedded_nested_threads() {
     let mentions = EdgeKind::Mentions;
     assert!(lookup_weight(unit, page_key, mentions, "POST /v1/charges").is_some());
     assert!(lookup_weight(unit, page_key, mentions, "Ledger").is_some());
-    assert_eq!(lookup_weight(unit, page_key, mentions, "arch/api/charges"), Some(0.9));
+    assert_eq!(
+        lookup_weight(unit, page_key, mentions, "arch/api/charges"),
+        Some(0.9)
+    );
     assert!(lookup_weight(unit, page_key, mentions, "PAY-999").is_none());
-    assert_eq!(lookup_weight(unit, page_key, EdgeKind::Documents, "Ledger"), Some(0.8));
+    assert_eq!(
+        lookup_weight(unit, page_key, EdgeKind::Documents, "Ledger"),
+        Some(0.8)
+    );
 
     let t9 = "thread:eng-wiki:4711/t-9";
     let thread = node(unit, t9);
@@ -292,11 +360,24 @@ fn html_page_with_meta_tags_and_embedded_nested_threads() {
     let comments: Vec<&crate::base::Chunk> = unit
         .chunks
         .iter()
-        .filter(|chunk| chunk.kind == ChunkKind::Comment && chunk.node.as_str().starts_with("comment:eng-wiki:4711/t-9/"))
+        .filter(|chunk| {
+            chunk.kind == ChunkKind::Comment
+                && chunk
+                    .node
+                    .as_str()
+                    .starts_with("comment:eng-wiki:4711/t-9/")
+        })
         .collect();
     let mut bodies: Vec<&str> = comments.iter().map(|chunk| chunk.text.as_str()).collect();
     bodies.sort_unstable();
-    assert_eq!(bodies, ["Not in v1.", "Ok — 了解", "Should `Ledger::refund` live here?"]);
+    assert_eq!(
+        bodies,
+        [
+            "Not in v1.",
+            "Ok — 了解",
+            "Should `Ledger::refund` live here?"
+        ]
+    );
     let c1 = "comment:eng-wiki:4711/t-9/c-1";
     let c2 = "comment:eng-wiki:4711/t-9/c-2";
     assert!(has_key_edge(unit, c2, EdgeKind::ReplyTo, c1));
@@ -307,8 +388,16 @@ fn html_page_with_meta_tags_and_embedded_nested_threads() {
         .expect("generated comment");
     assert!(c3.starts_with("comment:eng-wiki:4711/t-9/c-"));
     assert!(has_key_edge(unit, c3, EdgeKind::ReplyTo, c2));
-    assert!(has_key_edge(unit, c3, EdgeKind::AuthoredBy, "person:zoë-ångström"));
-    assert_eq!(node(unit, c3).attrs[attrs::CREATED_AT], 1_714_726_800_000_i64);
+    assert!(has_key_edge(
+        unit,
+        c3,
+        EdgeKind::AuthoredBy,
+        "person:zoë-ångström"
+    ));
+    assert_eq!(
+        node(unit, c3).attrs[attrs::CREATED_AT],
+        1_714_726_800_000_i64
+    );
 
     // A thread without any attribute is still ingested, as an open page thread.
     let bare: Vec<&NodeAssertion> = unit
@@ -345,7 +434,11 @@ fn defaults_and_malformed_metadata_degrade_to_warnings() {
     assert_eq!(broken.units[0].nodes[0].name, "Real Title");
     assert_eq!(broken.warnings.len(), 2, "{:?}", broken.warnings);
     assert!(broken.warnings[0].message.contains("front matter"));
-    assert!(broken.warnings[1].message.contains("malformed comments JSON"));
+    assert!(
+        broken.warnings[1]
+            .message
+            .contains("malformed comments JSON")
+    );
 
     let wrong_shape = parse("a.md", "x\n", Some("{\"comments\": []}"));
     assert!(wrong_shape.warnings[0].message.contains("threads"));
@@ -365,7 +458,13 @@ fn same_input_yields_the_same_hash() {
     };
     let first = hash(RUNBOOK_MD, RUNBOOK_COMMENTS);
     assert_eq!(first, hash(RUNBOOK_MD, RUNBOOK_COMMENTS));
-    assert_ne!(first, hash(RUNBOOK_MD, &RUNBOOK_COMMENTS.replace("Nice page", "Nice page!")));
+    assert_ne!(
+        first,
+        hash(
+            RUNBOOK_MD,
+            &RUNBOOK_COMMENTS.replace("Nice page", "Nice page!")
+        )
+    );
     let html = |page: &str| {
         parse("arch/ledger.html", page, None).units[0]
             .content_hash()
@@ -377,7 +476,9 @@ fn same_input_yields_the_same_hash() {
 #[test]
 fn long_sections_are_split_into_bounded_chunks() {
     let paragraph = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(8);
-    let page = format!("# Long\n\n{paragraph}\n\n{paragraph}\n\n{paragraph}\n\n{paragraph}\n\n{paragraph}\n");
+    let page = format!(
+        "# Long\n\n{paragraph}\n\n{paragraph}\n\n{paragraph}\n\n{paragraph}\n\n{paragraph}\n"
+    );
     let output = parse("long.md", &page, None);
     let chunks = &output.units[0].chunks;
     assert!(chunks.len() >= 2);
@@ -410,7 +511,13 @@ fn snapshot_mixing_formats_survives_a_corrupt_file() {
     let output = scan_wiki(root, &source(), &options).expect("scan");
     let mut keys: Vec<&str> = output.units.iter().map(|unit| unit.key.as_str()).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["eng-wiki/wiki_page/4711", "eng-wiki/wiki_page/payments-runbook"]);
+    assert_eq!(
+        keys,
+        [
+            "eng-wiki/wiki_page/4711",
+            "eng-wiki/wiki_page/payments-runbook"
+        ]
+    );
     let runbook = output
         .units
         .iter()
@@ -429,18 +536,37 @@ fn snapshot_mixing_formats_survives_a_corrupt_file() {
     };
     assert!(located("arch/corrupt.md")[0].contains("UTF-8"));
     assert!(located("arch/orphan.comments.json")[0].contains("without a page"));
-    assert_eq!(located("guides/runbook.md").len() + located("copy.md").len(), 4);
-    assert!(output.warnings.iter().any(|w| w.message.contains("same id")));
+    assert_eq!(
+        located("guides/runbook.md").len() + located("copy.md").len(),
+        4
+    );
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("same id"))
+    );
 
     // Scanning again gives byte-identical units.
     let again = scan_wiki(root, &source(), &options).expect("scan");
     assert_eq!(again, output);
 
     // Oversized pages are skipped, a missing directory is an error.
-    let tiny = WikiOptions { max_file_bytes: 64, ..WikiOptions::default() };
+    let tiny = WikiOptions {
+        max_file_bytes: 64,
+        ..WikiOptions::default()
+    };
     let limited = scan_wiki(root, &source(), &tiny).expect("scan");
-    assert!(limited.warnings.iter().any(|w| w.message.contains("over the limit")));
+    assert!(
+        limited
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("over the limit"))
+    );
     assert!(scan_wiki(&root.join("missing"), &source(), &options).is_err());
     assert!(is_wiki_page(Path::new("a/b.HTML")) && !is_wiki_page(Path::new("a/b.json")));
-    assert_eq!(sidecar_path(Path::new("a/b.md")), Path::new("a/b.comments.json"));
+    assert_eq!(
+        sidecar_path(Path::new("a/b.md")),
+        Path::new("a/b.comments.json")
+    );
 }

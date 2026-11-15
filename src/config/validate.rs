@@ -203,7 +203,10 @@ impl AnchorConfig {
         if let Some(dir) = &self.data_dir
             && dir.as_os_str().is_empty()
         {
-            report.error("data_dir", "must not be empty; remove the key to use the default");
+            report.error(
+                "data_dir",
+                "must not be empty; remove the key to use the default",
+            );
         }
         report
     }
@@ -236,7 +239,10 @@ impl AnchorConfig {
             for (field, patterns) in [("include", &source.include), ("exclude", &source.exclude)] {
                 for (n, pattern) in patterns.iter().enumerate() {
                     if let Err(err) = globset::Glob::new(pattern) {
-                        report.error(format!("{path}.{field}[{n}]"), format!("invalid glob: {err}"));
+                        report.error(
+                            format!("{path}.{field}[{n}]"),
+                            format!("invalid glob: {err}"),
+                        );
                     }
                 }
             }
@@ -348,7 +354,10 @@ impl AnchorConfig {
         match self.mode {
             Mode::Client => {
                 if sync.server_url.is_none() {
-                    report.error("sync.server_url", "client mode requires the sync server URL");
+                    report.error(
+                        "sync.server_url",
+                        "client mode requires the sync server URL",
+                    );
                 }
                 if sync.auth_token_env.is_none() {
                     report.warning(
@@ -475,7 +484,11 @@ mod tests {
         config.sources = vec![
             SourceConfig::new("ok.repo_1", SourceKind::Repo, existing.clone()),
             SourceConfig::new("Bad Id", SourceKind::Repo, existing.clone()),
-            SourceConfig::new("ok.repo_1", SourceKind::Wiki, dir.path().join("missing").to_string_lossy()),
+            SourceConfig::new(
+                "ok.repo_1",
+                SourceKind::Wiki,
+                dir.path().join("missing").to_string_lossy(),
+            ),
             SourceConfig::new("remote", SourceKind::Jira, "https://jira.example.test"),
             SourceConfig::new("-lead", SourceKind::Jira, " "),
         ];
@@ -488,7 +501,10 @@ mod tests {
         assert!(has(&report.errors, "sources[4].location"));
         assert!(has(&report.errors, "sources[0].include[0]"));
         assert!(!has(&report.warnings, "sources[0].location"));
-        assert!(!has(&report.warnings, "sources[3].location"), "URLs are not probed");
+        assert!(
+            !has(&report.warnings, "sources[3].location"),
+            "URLs are not probed"
+        );
         assert_eq!(report.errors.len(), 5, "{:?}", report.errors);
         let err = report.into_result().expect_err("errors block");
         assert!(err.to_string().contains("sources[1].id"));
@@ -543,7 +559,10 @@ mod tests {
 
         config.sync.server_url = Some("https://sync.example.test".to_owned());
         config.sync.transport = SyncTransport::WebSocket;
-        assert!(has(&config.validate().errors, "sync.server_url"), "scheme mismatch");
+        assert!(
+            has(&config.validate().errors, "sync.server_url"),
+            "scheme mismatch"
+        );
         config.sync.transport = SyncTransport::Grpc;
         config.sync.publish = vec![SourceId::new("ghost")];
         let report = config.validate();
