@@ -1,11 +1,49 @@
 syntax = "proto3";
 package anchor.sync.v1;
 
-// Placeholder service so the build pipeline (protox -> tonic-prost-build) is exercised.
-// The real protocol is defined by the sync module.
+// The Anchor sync protocol over gRPC. The same exchange runs over WebSockets (see
+// `src/sync/protocol.rs`). Authentication: `authorization: Bearer <token>` request metadata on
+// every call; a server without a token accepts only loopback peers.
 service AnchorSync {
-  rpc Ping(PingRequest) returns (PingReply);
+  // Exchanges Merkle roots per namespace.
+  rpc Hello(HelloRequest) returns (HelloReply);
+  // Unit metas (JSON `{source: [UnitMeta]}`) of the requested namespaces, for the version comparison.
+  rpc Metas(MetasRequest) returns (MetasReply);
+  // Server-streaming: a signed `.contextpack` delta with the requested unit keys.
+  rpc Pull(PullRequest) returns (stream PackChunk);
+  // Client-streaming: a signed `.contextpack` delta for the server to verify and merge.
+  rpc Push(stream PackChunk) returns (PushReply);
+  // Server-streaming change notifications.
+  rpc Watch(WatchRequest) returns (stream Change);
 }
 
-message PingRequest { string nonce = 1; }
-message PingReply { string nonce = 1; }
+message HelloRequest {
+  uint32 protocol_version = 1;
+  string device_id = 2;
+  // namespace (source id) -> hex Merkle root
+  map<string, string> roots = 3;
+}
+message HelloReply {
+  uint32 protocol_version = 1;
+  string device_id = 2;
+  map<string, string> roots = 3;
+}
+message MetasRequest { repeated string sources = 1; }
+message MetasReply { bytes json = 1; }
+message PullRequest {
+  repeated string keys = 1;
+  // The requester's roots, recorded as the delta base roots of the pack.
+  map<string, string> base_roots = 2;
+}
+// A slice of a `.contextpack`; the chunks of one stream concatenate to the whole pack.
+message PackChunk { bytes data = 1; }
+message PushReply {
+  uint64 applied = 1;
+  uint64 stale = 2;
+  repeated string rejected = 3;
+}
+message WatchRequest { string device_id = 1; }
+message Change {
+  string source = 1;
+  string origin = 2;
+}
