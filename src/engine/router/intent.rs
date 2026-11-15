@@ -372,6 +372,16 @@ const NOT_A_NAME: &[&str] = &[
     "done",
     "open",
     "closed",
+    "compare",
+    "summarise",
+    "summarize",
+    "explain",
+    "describe",
+    "list",
+    "show",
+    "find",
+    "tell",
+    "give",
 ];
 
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| {

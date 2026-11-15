@@ -158,6 +158,8 @@ impl Parties {
     }
 }
 
+// The variants are built once per rule set and never moved in bulk.
+#[allow(clippy::large_enum_variant)]
 enum Matcher {
     Codeowners(codeowners::Compiled),
     Maintainers(maintainers::Compiled),

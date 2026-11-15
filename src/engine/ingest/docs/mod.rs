@@ -148,10 +148,10 @@ fn link_targets(path: &str, links: &[DocLink]) -> BTreeSet<String> {
                 let resolved = text::strip_extension(&resolved).to_owned();
                 // Sphinx resolves absolute references against the documentation root, which is
                 // usually the top-level directory of the linking file (`Documentation/`).
-                if link.target.starts_with('/') {
-                    if let Some((root, _)) = path.split_once('/') {
-                        targets.insert(format!("{root}/{resolved}"));
-                    }
+                if link.target.starts_with('/')
+                    && let Some((root, _)) = path.split_once('/')
+                {
+                    targets.insert(format!("{root}/{resolved}"));
                 }
                 targets.insert(resolved);
             }

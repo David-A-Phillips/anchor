@@ -234,13 +234,13 @@ pub fn markdown_links(text: &str) -> Vec<DocLink> {
                     target: title.to_owned(),
                 });
             }
-        } else if let (Some(whole), Some(target)) = (caps.get(0), caps.get(2)) {
-            if !text[..whole.start()].ends_with('!') {
-                links.push(DocLink {
-                    kind: LinkKind::Path,
-                    target: target.as_str().to_owned(),
-                });
-            }
+        } else if let (Some(whole), Some(target)) = (caps.get(0), caps.get(2))
+            && !text[..whole.start()].ends_with('!')
+        {
+            links.push(DocLink {
+                kind: LinkKind::Path,
+                target: target.as_str().to_owned(),
+            });
         }
     }
     links
@@ -419,11 +419,11 @@ static RST_INLINE: LazyLock<Regex> = LazyLock::new(|| {
 /// Splits `Title <target>` into its parts; a body without angle brackets is only a target.
 fn title_and_target(body: &str) -> (Option<&str>, &str) {
     let body = body.trim();
-    if let Some(stripped) = body.strip_suffix('>') {
-        if let Some((title, target)) = stripped.rsplit_once('<') {
-            let title = title.trim();
-            return ((!title.is_empty()).then_some(title), target.trim());
-        }
+    if let Some(stripped) = body.strip_suffix('>')
+        && let Some((title, target)) = stripped.rsplit_once('<')
+    {
+        let title = title.trim();
+        return ((!title.is_empty()).then_some(title), target.trim());
     }
     (None, body)
 }
@@ -527,20 +527,19 @@ fn underlined_document(text: &str, flavour: Flavour) -> ParsedText {
             && (i == 0 || lines[i - 1].trim().is_empty() || adornment(lines[i - 1]).is_some())
             && i + 1 < lines.len()
             && !(rst && line.starts_with(".. "))
+            && let Some(mark) = adornment(lines[i + 1])
         {
-            if let Some(mark) = adornment(lines[i + 1]) {
-                let title_len = line.trim().chars().count();
-                let rule_len = lines[i + 1].trim_end().len();
-                if title_len <= 200 && rule_len * 2 >= title_len {
-                    let title = if rst {
-                        rst_inline(line.trim(), &mut links)
-                    } else {
-                        line.trim().to_owned()
-                    };
-                    builder.heading(level_of((mark, false)), &title);
-                    i += 2;
-                    continue;
-                }
+            let title_len = line.trim().chars().count();
+            let rule_len = lines[i + 1].trim_end().len();
+            if title_len <= 200 && rule_len * 2 >= title_len {
+                let title = if rst {
+                    rst_inline(line.trim(), &mut links)
+                } else {
+                    line.trim().to_owned()
+                };
+                builder.heading(level_of((mark, false)), &title);
+                i += 2;
+                continue;
             }
         }
         if rst {

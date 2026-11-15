@@ -327,6 +327,8 @@ pub fn scan_wiki(dir: &Path, source: &SourceId, options: &WikiOptions) -> Result
                     .iter()
                     .any(|unit| !seen_units.insert(unit.key.clone()));
                 if duplicate {
+                    // The skipped page's own problems are still worth reporting.
+                    output.warnings.extend(page.warnings);
                     output.warn(
                         rel,
                         "another page of the snapshot has the same id; this one is skipped",
