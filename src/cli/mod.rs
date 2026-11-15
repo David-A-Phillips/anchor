@@ -86,6 +86,14 @@ enum Command {
     },
     /// List open gap-analysis backlog items.
     Backlog,
+    /// Ingest a source more deeply (zoom in): phone_book -> map -> full.
+    Deepen {
+        /// Source id.
+        source: String,
+        /// Target depth.
+        #[arg(long, default_value = "full")]
+        depth: crate::config::Depth,
+    },
     /// Export a signed .contextpack snapshot of the graph.
     Export {
         /// Copy the pack to this path (default: the data directory's packs folder).
@@ -224,7 +232,8 @@ fn trust_policy(keys_dir: &std::path::Path) -> Result<TrustPolicy> {
     })
 }
 
-fn query_engine(engine: &Engine) -> QueryEngine {
+fn query_engine(engine: &Arc<Engine>) -> QueryEngine {
+    let depths: Arc<dyn crate::engine::query::DepthControl> = engine.clone();
     QueryEngine::new(QueryDeps {
         store: engine.store().clone(),
         graph: engine.graph(),
@@ -235,6 +244,7 @@ fn query_engine(engine: &Engine) -> QueryEngine {
         graph_config: engine.config().graph.clone(),
         query_config: engine.config().query.clone(),
     })
+    .with_depths(depths)
 }
 
 fn print_progress(event: ProvisionEvent) {
@@ -353,6 +363,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                         item.role, item.node.name, item.node.key, item.node.trust
                     );
                 }
+                for area in &response.shallow {
+                    println!("  shallow [{}]: {}", area.status, area.detail);
+                }
                 for gap in &response.gaps {
                     println!("  gap: {} — {}", gap.kind, gap.detail);
                 }
@@ -429,8 +442,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             for source in &engine.config().sources {
                 println!(
-                    "source   {:<24} {:<12} {}",
-                    source.id, source.kind, source.trust
+                    "source   {:<24} {:<12} {:<16} depth {}",
+                    source.id,
+                    source.kind,
+                    source.trust,
+                    engine.depth(&source.id)
                 );
             }
         }
@@ -566,6 +582,26 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "Questions with known answers are in {}.",
                 out.join("ground_truth.json").display()
             );
+        }
+        Command::Deepen { source, depth } => {
+            let (config, _) = load_config(&cli.config)?;
+            let engine = open_engine(config).await?;
+            let scan = engine.clone();
+            let report =
+                tokio::task::spawn_blocking(move || scan.deepen(&SourceId::new(source), depth))
+                    .await??;
+            println!(
+                "{} is now at {} depth: {} files, {} units applied, {} nodes, {} edges in {} ms.",
+                report.source,
+                report.depth,
+                report.files_seen,
+                report.units_applied,
+                report.nodes_upserted,
+                report.edges_upserted,
+                report.duration_ms
+            );
+            engine.embed_pending().await?;
+            engine.flush()?;
         }
         Command::Ollama { action } => {
             let (mut config, path) = load_config(&cli.config)?;

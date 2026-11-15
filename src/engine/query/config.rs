@@ -2,6 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What to do when a question touches a source that is ingested below full depth.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShallowPolicy {
+    /// Deepen the source first, then answer from the deeper graph.
+    Block,
+    /// Answer now from what is there, flag it, and deepen in the background.
+    #[default]
+    Background,
+    /// Answer now, flag it, and wait for an explicit `anchor deepen`.
+    Manual,
+}
+
 /// Retrieval and answer settings.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -12,6 +25,8 @@ pub struct QueryConfig {
     pub max_context_tokens: usize,
     /// Queries answered with confidence below this value are logged to the backlog.
     pub confidence_threshold: f32,
+    /// Behaviour when a question touches a shallow source.
+    pub on_shallow: ShallowPolicy,
 }
 
 impl Default for QueryConfig {
@@ -20,6 +35,7 @@ impl Default for QueryConfig {
             top_k: 12,
             max_context_tokens: 6000,
             confidence_threshold: 0.55,
+            on_shallow: ShallowPolicy::Background,
         }
     }
 }

@@ -38,7 +38,8 @@ use crate::base::{
 pub const RELINK_LIMIT: usize = 500;
 
 /// Schema history of the graph store tables.
-pub const MIGRATIONS: &[Migration] = &[Migration {
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
     version: 1,
     name: "graph store",
     sql: "
@@ -97,7 +98,13 @@ CREATE INDEX chunks_node ON chunks(node_id);
 CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='id');
 CREATE VIRTUAL TABLE nodes_fts USING fts5(name, content='nodes', content_rowid='id');
 ",
-}];
+},
+    Migration {
+        version: 2,
+        name: "source depth",
+        sql: "CREATE TABLE source_depth (source TEXT PRIMARY KEY, depth INTEGER NOT NULL) WITHOUT ROWID;",
+    },
+];
 
 /// What a write did.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1765,6 +1772,28 @@ impl GraphStore {
                 [],
             )?;
             Ok(removed)
+        })
+    }
+
+    /// The depth a source has been ingested at so far, if recorded.
+    pub fn source_depth(&self, source: &SourceId) -> Result<Option<u8>> {
+        self.db.read(|conn| {
+            Ok(conn
+                .prepare_cached("SELECT depth FROM source_depth WHERE source = ?1")?
+                .query_row([source.as_str()], |row| row.get(0))
+                .optional()?)
+        })
+    }
+
+    /// Records the depth a source has been ingested at.
+    pub fn set_source_depth(&self, source: &SourceId, depth: u8) -> Result<()> {
+        self.db.write(|conn| {
+            conn.execute(
+                "INSERT INTO source_depth (source, depth) VALUES (?1, ?2)
+                 ON CONFLICT(source) DO UPDATE SET depth = excluded.depth",
+                params![source.as_str(), depth],
+            )?;
+            Ok(())
         })
     }
 

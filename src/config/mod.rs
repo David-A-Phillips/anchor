@@ -44,6 +44,70 @@ pub enum Mode {
     Server,
 }
 
+/// How much of a source is ingested: the zoom level of its "map tile".
+///
+/// Depth is ordered: `PhoneBook < Map < Full`. Queries that touch a source below `Full` are
+/// answered from what is there and flagged as shallow.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Depth {
+    /// High-level entries only: the service, its owners and (for other kinds) nothing else.
+    PhoneBook,
+    /// Files, symbols with signatures and doc comments, document text; no call graph, no code.
+    Map,
+    /// Everything.
+    #[default]
+    Full,
+}
+
+impl Depth {
+    /// Stable textual name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Depth::PhoneBook => "phone_book",
+            Depth::Map => "map",
+            Depth::Full => "full",
+        }
+    }
+
+    /// Numeric code, increasing with depth.
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`Self::code`]; unknown codes are `Full`.
+    pub const fn from_code(code: u8) -> Self {
+        match code {
+            0 => Depth::PhoneBook,
+            1 => Depth::Map,
+            _ => Depth::Full,
+        }
+    }
+}
+
+impl std::fmt::Display for Depth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Depth {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "phone_book" | "phonebook" | "l0" => Ok(Depth::PhoneBook),
+            "map" | "l1" => Ok(Depth::Map),
+            "full" | "l2" => Ok(Depth::Full),
+            other => Err(crate::Error::invalid(format!(
+                "unknown depth `{other}` (expected phone_book, map or full)"
+            ))),
+        }
+    }
+}
+
 /// One configured source (`[[sources]]`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SourceConfig {
@@ -58,6 +122,9 @@ pub struct SourceConfig {
     /// Human-readable name; defaults to the id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// How deep the source is ingested initially; it can be deepened later (`anchor deepen`).
+    #[serde(default)]
+    pub depth: Depth,
     /// Disabled sources are kept in the configuration but not ingested.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -85,6 +152,7 @@ impl SourceConfig {
             trust: Self::default_trust(kind),
             location: location.into(),
             name: None,
+            depth: Depth::Full,
             enabled: true,
             include: Vec::new(),
             exclude: Vec::new(),

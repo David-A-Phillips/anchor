@@ -97,7 +97,7 @@ async fn stats(State(state): State<WebState>) -> Api {
         .config()
         .sources
         .iter()
-        .map(|s| json!({ "id": s.id, "kind": s.kind, "trust": s.trust, "name": s.display_name(), "enabled": s.enabled }))
+        .map(|s| json!({ "id": s.id, "kind": s.kind, "trust": s.trust, "name": s.display_name(), "enabled": s.enabled, "depth": state.engine.depth(&s.id) }))
         .collect();
     Ok(Json(json!({
         "store": stats,

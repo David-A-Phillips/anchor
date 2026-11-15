@@ -21,10 +21,35 @@ use super::store::{GraphStore, NodeRecord, Resolution};
 use crate::backlog::{Backlog, GapReport};
 use crate::base::{
     CallPurpose, ChunkId, CompletionRequest, EdgeKind, EmbedKind, Embedder, FinishReason,
-    IntentKind, Lookup, ModelTier, NodeId, NodeKind, QueryIntent, Result, TrustLevel, attrs,
+    IntentKind, Lookup, ModelTier, NodeId, NodeKind, QueryIntent, Result, SourceId, TrustLevel,
+    attrs,
 };
+use crate::config::Depth;
 
-pub use config::QueryConfig;
+pub use config::{QueryConfig, ShallowPolicy};
+
+/// Lets the query engine see which sources are shallow and ask for them to be deepened.
+/// Implemented by the engine; a remote implementation can pull deeper tiles from a server.
+pub trait DepthControl: Send + Sync {
+    /// Sources ingested below full depth.
+    fn shallow_sources(&self) -> Vec<(SourceId, Depth)>;
+    /// Brings a source to full depth. Blocking.
+    fn deepen(&self, source: &SourceId) -> Result<()>;
+}
+
+/// A part of the answer that rests on a source ingested below full depth.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShallowArea {
+    /// The shallow source.
+    pub source: String,
+    /// Depth it was at when the question was asked.
+    pub depth: Depth,
+    /// `deepened` (done before answering), `deepening` (in progress in the background) or
+    /// `manual` (waiting for `anchor deepen`).
+    pub status: String,
+    /// What this means for the answer.
+    pub detail: String,
+}
 
 /// How much of the pipeline to run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +254,10 @@ pub struct QueryResponse {
     pub confidence: f32,
     /// Retrieved context.
     pub context: ContextBundle,
+    /// Sources below full depth that this answer rests on, or that might hold what is missing.
+    /// Empty when everything relevant is fully ingested.
+    #[serde(default)]
+    pub shallow: Vec<ShallowArea>,
     /// Gaps found.
     pub gaps: Vec<Gap>,
     /// Model calls made.
@@ -262,6 +291,7 @@ pub struct QueryDeps {
 #[derive(Clone)]
 pub struct QueryEngine {
     deps: QueryDeps,
+    depths: Option<Arc<dyn DepthControl>>,
 }
 
 const ENTITY_KINDS: &[NodeKind] = &[
@@ -303,7 +333,41 @@ fn truncate(text: &str, max: usize) -> String {
 impl QueryEngine {
     /// Builds the engine.
     pub fn new(deps: QueryDeps) -> Self {
-        Self { deps }
+        Self { deps, depths: None }
+    }
+
+    /// Makes the engine depth-aware: answers that touch shallow sources are flagged, and
+    /// [`QueryConfig::on_shallow`] decides whether to deepen first, in the background, or not.
+    pub fn with_depths(mut self, depths: Arc<dyn DepthControl>) -> Self {
+        self.depths = Some(depths);
+        self
+    }
+
+    /// The shallow sources relevant to a retrieval: those that contributed context, plus every
+    /// shallow source when the answer is weak (what is missing may be in any of them).
+    fn shallow_for(&self, retrieved: &Retrieved) -> Result<Vec<(SourceId, Depth)>> {
+        let Some(depths) = &self.depths else {
+            return Ok(Vec::new());
+        };
+        let shallow = depths.shallow_sources();
+        if shallow.is_empty() {
+            return Ok(shallow);
+        }
+        let weak = retrieved.confidence < self.deps.query_config.confidence_threshold
+            || retrieved.gaps.iter().any(|gap| gap.kind != "conflict");
+        if weak {
+            return Ok(shallow);
+        }
+        let mut used = HashSet::new();
+        for item in &retrieved.bundle.items {
+            if let Some(node) = self.deps.store.node(NodeId(item.node.id))? {
+                used.extend(node.sources);
+            }
+        }
+        Ok(shallow
+            .into_iter()
+            .filter(|(source, _)| used.contains(source))
+            .collect())
     }
 
     fn node_ref(&self, id: NodeId) -> Result<Option<NodeRef>> {
@@ -788,6 +852,71 @@ impl QueryEngine {
         let mut retrieved =
             tokio::task::spawn_blocking(move || this.retrieve_blocking(&req, &int, &vector_hits))
                 .await??;
+        // Shallow areas: flag them, and deepen according to the policy.
+        let mut shallow = Vec::new();
+        if let Some(depths) = self.depths.clone() {
+            let this = self.clone();
+            let (relevant, back) = tokio::task::spawn_blocking(move || {
+                let relevant = this.shallow_for(&retrieved);
+                (relevant, retrieved)
+            })
+            .await?;
+            retrieved = back;
+            let relevant = relevant?;
+            let policy = self.deps.query_config.on_shallow;
+            if !relevant.is_empty() {
+                let sources: Vec<SourceId> =
+                    relevant.iter().map(|(source, _)| source.clone()).collect();
+                let status = match policy {
+                    ShallowPolicy::Block => {
+                        let control = depths.clone();
+                        let todo = sources.clone();
+                        tokio::task::spawn_blocking(move || {
+                            todo.iter().try_for_each(|source| control.deepen(source))
+                        })
+                        .await??;
+                        let this = self.clone();
+                        let (req, int) = (request.clone(), intent.clone());
+                        retrieved = tokio::task::spawn_blocking(move || {
+                            this.retrieve_blocking(&req, &int, &[])
+                        })
+                        .await??;
+                        "deepened"
+                    }
+                    ShallowPolicy::Background => {
+                        let control = depths.clone();
+                        tokio::task::spawn_blocking(move || {
+                            for source in &sources {
+                                if let Err(err) = control.deepen(source) {
+                                    tracing::warn!("deepening {source} failed: {err}");
+                                }
+                            }
+                        });
+                        "deepening"
+                    }
+                    ShallowPolicy::Manual => "manual",
+                };
+                for (source, depth) in relevant {
+                    let detail = match status {
+                        "deepened" => format!(
+                            "{source} was at {depth} depth and has been deepened to full before answering"
+                        ),
+                        "deepening" => format!(
+                            "{source} is at {depth} depth: this answer may be incomplete and will improve once background deepening finishes"
+                        ),
+                        _ => format!(
+                            "{source} is at {depth} depth: this answer may be incomplete; run `anchor deepen {source}` for full detail"
+                        ),
+                    };
+                    shallow.push(ShallowArea {
+                        source: source.to_string(),
+                        depth,
+                        status: status.to_owned(),
+                        detail,
+                    });
+                }
+            }
+        }
         timings.insert("retrieve".to_owned(), stage.elapsed().as_millis() as u64);
 
         let stage = Instant::now();
@@ -886,6 +1015,7 @@ impl QueryEngine {
             answer,
             confidence: retrieved.confidence,
             context: retrieved.bundle,
+            shallow,
             gaps: retrieved.gaps,
             usage,
             timings_ms: timings,

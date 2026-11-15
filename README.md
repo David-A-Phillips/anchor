@@ -118,6 +118,7 @@ The exact accepted formats are documented at the top of each parser module under
 | `anchor status` | Graph and source statistics |
 | `anchor spend [--days N]` | Token usage and estimated cost, local vs. cloud |
 | `anchor backlog` | Open gap-analysis items |
+| `anchor deepen SOURCE [--depth map\|full]` | Ingest a source more deeply |
 | `anchor export [-o FILE]` / `anchor import FILE` | Write or merge a signed `.contextpack` |
 | `anchor server` / `anchor sync` | Run the central sync server / sync once against it |
 | `anchor ollama status\|provision\|teardown\|rebuild` | Manage the local Ollama backend |
@@ -177,6 +178,41 @@ down, rebuilds and verifies again.
 
 `scripts/fetch-corpus.sh` fetches a real-world corpus (Linux, Kubernetes, Grafana, exported pull-
 request reviews) into `./corpus` for scale testing.
+
+## Zoom levels (depth)
+
+Each source is ingested at a depth, like map tiles. Everyone can hold the whole organisation at
+phone-book depth and go deep only where they work.
+
+| Depth | What is ingested |
+|-------|------------------|
+| `phone_book` | Repositories: the service and its owners only. Org model and API portal: everything (they are the phone book). Wikis, Jira and reviews: nothing. |
+| `map` | Plus files, symbols with signatures and doc comments, and document text. No call graph, no code previews. |
+| `full` | Everything (the default). |
+
+```toml
+[[sources]]
+id = "payments-api"
+kind = "repo"
+trust = "source_of_truth"
+depth = "phone_book"
+location = "/src/payments-api"
+
+[query]
+on_shallow = "background"      # block | background | manual
+```
+
+When a question touches a source below full depth, the answer always lists it under `shallow`
+(in the JSON response, the CLI output and the dashboard), with its depth and what is being done:
+
+- `block`: deepen the source first, then answer from the deeper graph.
+- `background` (default): answer now from what is there, and deepen behind it; asking again later
+  gives the fuller answer.
+- `manual`: answer now and wait for `anchor deepen <source> [--depth map|full]`.
+
+Deepening works from the local copy of the source and needs no server. It is remembered across
+restarts and never goes shallower. Pulling deeper tiles from a sync server for sources that are
+not on the local disk is not implemented yet.
 
 ## Database size
 

@@ -25,7 +25,7 @@ use crate::base::{
     ChunkId, DeviceId, EdgeAssertion, EdgeKind, Embedder, Error, HlcClock, NodeAssertion, NodeKind,
     Result, SourceId, SourceKind, Unit, UnitKey, UnitKind, UnitVersion, attrs, keys,
 };
-use crate::config::{AnchorConfig, AnchorPaths, SourceConfig};
+use crate::config::{AnchorConfig, AnchorPaths, Depth, SourceConfig};
 use crate::metrics::{PriceTable, TokenLedger};
 use crate::sync::identity::DeviceIdentity;
 
@@ -70,6 +70,8 @@ pub enum EngineEvent {
 pub struct ScanReport {
     /// Source scanned.
     pub source: String,
+    /// Depth the source was scanned at (`phone_book`, `map` or `full`).
+    pub depth: String,
     /// Files or documents seen.
     pub files_seen: usize,
     /// Files skipped because they were unchanged since the last scan.
@@ -124,6 +126,7 @@ pub struct Engine {
     latencies: Mutex<Vec<u64>>,
     ownership: Mutex<HashMap<SourceId, Arc<OwnershipRules>>>,
     manifest: Mutex<HashMap<(SourceId, String), (u64, i128)>>,
+    depths: Mutex<HashMap<SourceId, Depth>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -143,6 +146,16 @@ struct LedgerSpend(Arc<TokenLedger>);
 impl super::router::SpendTracker for LedgerSpend {
     fn cloud_spend_today_usd(&self) -> f64 {
         self.0.cloud_spend_today_usd().unwrap_or(0.0)
+    }
+}
+
+impl crate::engine::query::DepthControl for Engine {
+    fn shallow_sources(&self) -> Vec<(SourceId, Depth)> {
+        Engine::shallow_sources(self)
+    }
+
+    fn deepen(&self, source: &SourceId) -> Result<()> {
+        Engine::deepen(self, source, Depth::Full).map(|_| ())
     }
 }
 
@@ -209,6 +222,7 @@ impl Engine {
             latencies: Mutex::new(Vec::new()),
             ownership: Mutex::new(HashMap::new()),
             manifest: Mutex::new(HashMap::new()),
+            depths: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -255,6 +269,49 @@ impl Engine {
     /// Subscribes to engine events.
     pub fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
+    }
+
+    /// The depth a source is ingested at: the deeper of its configured depth and the depth it
+    /// has been deepened to at runtime. Unknown sources are reported as fully ingested.
+    pub fn depth(&self, id: &SourceId) -> Depth {
+        if let Some(depth) = self.depths.lock().get(id) {
+            return *depth;
+        }
+        let configured = self
+            .config
+            .source(id)
+            .map_or(Depth::Full, |source| source.depth);
+        let stored = self
+            .store
+            .source_depth(id)
+            .ok()
+            .flatten()
+            .map_or(Depth::PhoneBook, Depth::from_code);
+        let depth = configured.max(stored);
+        self.depths.lock().insert(id.clone(), depth);
+        depth
+    }
+
+    /// Sources ingested below full depth, with their current depth.
+    pub fn shallow_sources(&self) -> Vec<(SourceId, Depth)> {
+        self.config
+            .sources
+            .iter()
+            .filter(|source| source.enabled)
+            .map(|source| (source.id.clone(), self.depth(&source.id)))
+            .filter(|(_, depth)| *depth < Depth::Full)
+            .collect()
+    }
+
+    /// Ingests a source more deeply (never more shallowly) and re-scans it. Works entirely from
+    /// the local copy of the source.
+    pub fn deepen(&self, id: &SourceId, depth: Depth) -> Result<ScanReport> {
+        self.source(id)?;
+        let target = self.depth(id).max(depth);
+        self.store.set_source_depth(id, target.code())?;
+        self.depths.lock().insert(id.clone(), target);
+        self.manifest.lock().retain(|(source, _), _| source != id);
+        self.scan_source(id)
     }
 
     fn version(&self) -> UnitVersion {
@@ -382,13 +439,23 @@ impl Engine {
         let started = Instant::now();
         let source = self.source(id)?;
         let root = PathBuf::from(&source.location);
+        let depth = self.depth(id);
         let mut report = ScanReport {
             source: id.to_string(),
+            depth: depth.to_string(),
             ..ScanReport::default()
         };
         let mut produced: BTreeSet<UnitKey> = BTreeSet::new();
         let mut complete = true;
+        // At phone-book depth only directory-like sources are read: repositories contribute
+        // their service and owners, the org model and API portal are the phone book itself.
+        let skipped = depth == Depth::PhoneBook
+            && matches!(
+                source.kind,
+                SourceKind::Wiki | SourceKind::Jira | SourceKind::CodeReview
+            );
         match source.kind {
+            _ if skipped => {}
             SourceKind::Repo => {
                 complete = self.scan_repo(source, &root, &mut report, &mut produced)?
             }
@@ -450,6 +517,7 @@ impl Engine {
             report.units_removed = stale.len();
             self.remove(&stale)?;
         }
+        self.store.set_source_depth(id, depth.code())?;
         report.duration_ms = started.elapsed().as_millis() as u64;
         self.publish(EngineEvent::ScanFinished {
             report: report.clone(),
@@ -640,6 +708,17 @@ impl Engine {
         } else {
             return Ok(None);
         };
+        if self.depth(id) < Depth::Full {
+            // Map depth: what exists and where, not how it is wired or implemented.
+            unit.edges.retain(|edge| {
+                !matches!(
+                    edge.kind,
+                    EdgeKind::Calls | EdgeKind::References | EdgeKind::Imports
+                )
+            });
+            unit.chunks
+                .retain(|chunk| chunk.kind != crate::base::ChunkKind::Code);
+        }
         if let Some(rules) = rules {
             let file_key = keys::file(id, rel);
             if unit.nodes.iter().any(|node| node.key == file_key) {
@@ -709,6 +788,9 @@ impl Engine {
             produced.insert(unit.key.clone());
         }
         self.apply_batch(&mut batch, report)?;
+        if self.depth(id) == Depth::PhoneBook {
+            return Ok(true);
+        }
 
         let max = self.config.parser.max_file_bytes;
         for (path, rel) in &files {
@@ -796,6 +878,9 @@ impl Engine {
             return Ok(true);
         }
         if rel.starts_with(".git/") || rel.is_empty() {
+            return Ok(false);
+        }
+        if self.depth(&id) == Depth::PhoneBook && ownership_file_kind(&rel).is_none() {
             return Ok(false);
         }
         if ownership_file_kind(&rel).is_some() {

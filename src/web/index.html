@@ -103,6 +103,7 @@ $("ask").onclick = async () => {
     for (const item of r.context.items) { const a = el("a", item.node.name); a.onclick = () => { show("graph"); openNode(item.node.id); }; const ev = item.path.map((s) => s.from.name + " " + (s.direction === "forward" ? "—" + s.edge + "→" : "←" + s.edge + "—") + " " + s.to.name).join("; ") || (item.snippets[0] ? item.snippets[0].text.slice(0, 160) : ""); row($("context"), [item.role, a, item.node.kind, badge(item.node.trust), ev]); }
     clear($("conflicts"));
     for (const c of r.context.conflicts) $("conflicts").appendChild(el("p", "Conflict: " + c.explanation));
+    for (const a of r.shallow || []) $("conflicts").appendChild(el("p", "Shallow [" + a.status + "]: " + a.detail));
     for (const g of r.gaps) $("conflicts").appendChild(el("p", g.kind + ": " + g.detail));
     if (!$("conflicts").firstChild) $("conflicts").textContent = "none";
   } catch (e) { $("answer").textContent = e.message; }
