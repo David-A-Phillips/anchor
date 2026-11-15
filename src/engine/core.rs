@@ -16,7 +16,7 @@ use super::ingest::ownership::{
     OwnershipFileKind, OwnershipRules, ownership_file_kind, parse_codeowners, parse_maintainers,
     parse_owners_tree,
 };
-use super::ingest::{IngestOutput, api_portal, docs, jira, org, review, wiki};
+use super::ingest::{IngestOutput, api_portal, docs, issues, jira, org, review, wiki};
 use super::parser::{IncrementalParser, Language, build_file_unit};
 use super::router::TieredRouter;
 use super::store::{ApplyOutcome, GraphStore};
@@ -424,6 +424,7 @@ impl Engine {
             SourceKind::Wiki => 3,
             SourceKind::Jira => 4,
             SourceKind::CodeReview => 5,
+            SourceKind::Issues => 6,
         };
         let mut sources: Vec<&SourceConfig> =
             self.config.sources.iter().filter(|s| s.enabled).collect();
@@ -452,7 +453,7 @@ impl Engine {
         let skipped = depth == Depth::PhoneBook
             && matches!(
                 source.kind,
-                SourceKind::Wiki | SourceKind::Jira | SourceKind::CodeReview
+                SourceKind::Wiki | SourceKind::Jira | SourceKind::CodeReview | SourceKind::Issues
             );
         match source.kind {
             _ if skipped => {}
@@ -471,6 +472,17 @@ impl Engine {
             )?,
             SourceKind::ApiPortal => self.apply_output(
                 api_portal::scan_api_portal(&root, id, &Default::default())?,
+                &mut report,
+                &mut produced,
+            )?,
+            SourceKind::Issues => self.apply_output(
+                issues::scan_issues(
+                    &root,
+                    id,
+                    issues::IssueOptions {
+                        include_comments: depth == Depth::Full,
+                    },
+                )?,
                 &mut report,
                 &mut produced,
             )?,

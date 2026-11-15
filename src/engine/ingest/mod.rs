@@ -10,6 +10,7 @@
 
 pub mod api_portal;
 pub mod docs;
+pub mod issues;
 pub mod jira;
 pub mod mentions;
 pub mod org;

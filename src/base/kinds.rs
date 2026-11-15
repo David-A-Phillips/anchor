@@ -255,6 +255,8 @@ string_enum! {
         OrgModel = 5 => "org_model",
         /// Exported code-review discussions (pull requests with review threads).
         CodeReview = 6 => "code_review",
+        /// An issue board or discussion board export (GitHub issues and discussions).
+        Issues = 7 => "issues",
     }
 }
 

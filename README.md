@@ -101,7 +101,8 @@ portals and the org model, and `reference_only` for wikis, Jira and code reviews
 | `api_portal` | a directory | API records with approvals, plus OpenAPI/Swagger definitions |
 | `jira` | a directory | issue JSON in Jira REST shape (single issues, arrays or search results) |
 | `org_model` | a file or directory | portfolios → domains → components → services, teams and people (YAML, JSON or TOML) |
-| `code_review` | a directory | one JSON file per pull request; `scripts/corpus/fetch_reviews.py` exports them from GitHub |
+| `code_review` | a directory | one JSON file per pull request; `anchor fetch` exports them from GitHub |
+| `issues` | a directory | issue-board and discussion-board exports (GitHub issues and discussions), as written by `anchor fetch` |
 
 The exact accepted formats are documented at the top of each parser module under
 `src/engine/ingest/`.
@@ -118,6 +119,7 @@ The exact accepted formats are documented at the top of each parser module under
 | `anchor status` | Graph and source statistics |
 | `anchor spend [--days N]` | Token usage and estimated cost, local vs. cloud |
 | `anchor backlog` | Open gap-analysis items |
+| `anchor fetch OWNER/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
 | `anchor deepen SOURCE [--depth map\|full]` | Ingest a source more deeply |
 | `anchor export [-o FILE]` / `anchor import FILE` | Write or merge a signed `.contextpack` |
 | `anchor server` / `anchor sync` | Run the central sync server / sync once against it |
@@ -179,6 +181,22 @@ down, rebuilds and verifies again.
 `scripts/fetch-corpus.sh` fetches a real-world corpus (Linux, Kubernetes, Grafana, exported pull-
 request reviews) into `./corpus` for scale testing.
 
+## Issue boards, discussions and pull requests
+
+`anchor fetch owner/repo` exports the most recently updated issues, discussions and pull requests
+of a GitHub repository (with their comment and review threads) and prints the `[[sources]]`
+entries to add. It uses the GitHub CLI, so run `gh auth login` first; nothing is fetched unless
+you run the command, and already exported items are skipped on a re-run.
+
+```sh
+anchor fetch grafana/grafana --issues 100 --discussions 50 --pulls 50
+anchor ingest
+anchor query "What is the status of grafana#105210?"
+```
+
+Refer to an item as `repo#123` in a question. For `issues` sources, `map` depth ingests titles,
+state, labels and descriptions; `full` adds the comment threads.
+
 ## Zoom levels (depth)
 
 Each source is ingested at a depth, like map tiles. Everyone can hold the whole organisation at
@@ -234,13 +252,14 @@ embed_code = false                   # true: also embed code previews, not only 
 `cargo test --all-features --test e2e -- --nocapture` scores 166 generated questions with known
 answers. Current results: ownership questions ("Who owns API X?") recall 0.99 and top-answer
 accuracy 0.94, with stale reference-only claims never winning. Justification questions ("Why is
-this blocking?") are weaker: 1.0 recall for blocked APIs and endpoints, 0.5 for blocked tickets,
-and near zero for pull-request questions. Multi-hop relationship questions reach 0.37.
+this blocking?") reach 0.66 recall overall: 1.0 for blocked APIs and endpoints, 0.8 to 0.9 for
+pull requests and dismissed reviews, 0.5 for blocked tickets and 0.17 for dismissed wiki threads.
+Multi-hop relationship questions reach 0.30.
 
 ## Known limitations
 
-- Questions about a specific pull request, and multi-hop relationship questions ("who leads the
-  team that owns the component containing X"), are not yet understood by the heuristic classifier
+- Multi-hop relationship questions ("who leads the
+  team that owns the component containing X") are not yet understood by the heuristic classifier
   and retrieve poorly without a language model.
 - Context precision is low (about 0.2 for ownership): the context includes neighbouring evidence
   beyond the answer.

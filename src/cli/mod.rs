@@ -1,5 +1,7 @@
 //! Command-line interface (`anchor <command>`).
 
+pub mod fetch;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -86,6 +88,23 @@ enum Command {
     },
     /// List open gap-analysis backlog items.
     Backlog,
+    /// Export a GitHub repository's issues, discussions and pull-request reviews (needs `gh`).
+    Fetch {
+        /// `owner/name` of the repository.
+        repository: String,
+        /// Output directory (default: <data dir>/github/<owner>-<name>).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Most recently updated issues to export.
+        #[arg(long, default_value_t = 100)]
+        issues: usize,
+        /// Most recently updated discussions to export.
+        #[arg(long, default_value_t = 50)]
+        discussions: usize,
+        /// Most recently updated pull requests to export.
+        #[arg(long, default_value_t = 50)]
+        pulls: usize,
+    },
     /// Ingest a source more deeply (zoom in): phone_book -> map -> full.
     Deepen {
         /// Source id.
@@ -602,6 +621,51 @@ async fn dispatch(cli: Cli) -> Result<()> {
             );
             engine.embed_pending().await?;
             engine.flush()?;
+        }
+        Command::Fetch {
+            repository,
+            out,
+            issues,
+            discussions,
+            pulls,
+        } => {
+            let (config, _) = load_config(&cli.config)?;
+            let out = out.unwrap_or_else(|| {
+                config
+                    .paths()
+                    .root()
+                    .join("github")
+                    .join(repository.replace('/', "-"))
+            });
+            let options = fetch::FetchOptions {
+                repository: repository.clone(),
+                out: out.clone(),
+                issues,
+                discussions,
+                pulls,
+            };
+            let report =
+                tokio::task::spawn_blocking(move || fetch::fetch_github(&options)).await??;
+            println!(
+                "Exported {} issues, {} discussions and {} pull requests from {repository} ({} already present) into {}.",
+                report.issues,
+                report.discussions,
+                report.pulls,
+                report.skipped,
+                out.display()
+            );
+            let id = crate::base::keys::slugify(&repository);
+            println!("\nAdd these sources to your configuration, then run `anchor ingest`:\n");
+            for (suffix, kind, dir) in [
+                ("issues", "issues", "issues"),
+                ("discussions", "issues", "discussions"),
+                ("reviews", "code_review", "pulls"),
+            ] {
+                println!(
+                    "[[sources]]\nid = \"{id}-{suffix}\"\nkind = \"{kind}\"\ntrust = \"reference_only\"\nlocation = \"{}\"\n",
+                    out.join(dir).display()
+                );
+            }
         }
         Command::Ollama { action } => {
             let (mut config, path) = load_config(&cli.config)?;

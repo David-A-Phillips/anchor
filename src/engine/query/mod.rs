@@ -426,7 +426,27 @@ impl QueryEngine {
         let mut gaps = Vec::new();
         let mut reports = Vec::new();
 
-        // 1. Seeds.
+        // 1. Seeds. References of the form `repo#123` or `#123` name an issue, discussion or
+        // pull request exactly; put them first so they anchor the search.
+        let mut entities: Vec<crate::base::EntityMention> = request
+            .query
+            .split(|ch: char| ch.is_whitespace() || matches!(ch, '?' | ',' | ';' | '(' | ')' | '"'))
+            .map(|token| token.trim_end_matches(['.', ':', '!']))
+            .filter(|token| {
+                token.rsplit_once('#').is_some_and(|(_, number)| {
+                    !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+                })
+            })
+            .map(crate::base::EntityMention::new)
+            .collect();
+        for mention in &intent.entities {
+            if !entities
+                .iter()
+                .any(|known| known.text.contains(&mention.text))
+            {
+                entities.push(mention.clone());
+            }
+        }
         let mut seeds: Vec<Seed> = Vec::new();
         let mut exact = false;
         let add = |node: NodeId, cost: f32, seeds: &mut Vec<Seed>| {
@@ -434,7 +454,7 @@ impl QueryEngine {
                 seeds.push(Seed { node, cost });
             }
         };
-        for mention in &intent.entities {
+        for mention in &entities {
             let kinds: Vec<NodeKind> = match mention.kind_hint {
                 Some(kind) => std::iter::once(kind)
                     .chain(ENTITY_KINDS.iter().copied().filter(move |k| *k != kind))
@@ -798,7 +818,15 @@ impl QueryEngine {
                     }
                 }
                 if reasons.is_empty() {
-                    return Ok(None);
+                    // Nothing blocks it: report its recorded state, if it has one.
+                    let Some(node) = self.deps.store.node(NodeId(subject.id))? else {
+                        return Ok(None);
+                    };
+                    let state = [attrs::STATUS, attrs::DECISION, attrs::THREAD_STATUS]
+                        .iter()
+                        .find_map(|name| node.attrs.get(*name).and_then(|v| v.as_str()));
+                    return Ok(state
+                        .map(|state| format!("{} ({}) is {state}.", subject.name, subject.kind)));
                 }
                 Ok(Some(format!("{} is {}.", subject.name, reasons.join("; "))))
             }
