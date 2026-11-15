@@ -1,0 +1,9 @@
+/target
+/corpus
+/.anchor
+*.contextpack
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+.claude/worktrees/

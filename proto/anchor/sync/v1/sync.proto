@@ -1,0 +1,11 @@
+syntax = "proto3";
+package anchor.sync.v1;
+
+// Placeholder service so the build pipeline (protox -> tonic-prost-build) is exercised.
+// The real protocol is defined by the sync module.
+service AnchorSync {
+  rpc Ping(PingRequest) returns (PingReply);
+}
+
+message PingRequest { string nonce = 1; }
+message PingReply { string nonce = 1; }
