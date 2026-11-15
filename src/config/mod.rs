@@ -1,7 +1,10 @@
 //! Configuration: the `anchor.toml` model, filesystem layout, the interactive setup wizard and
 //! Ollama provisioning.
 
+mod file;
 mod ollama;
+pub mod provision;
+mod validate;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +23,12 @@ use crate::metrics::MetricsConfig;
 use crate::sync::SyncConfig;
 use crate::web::WebConfig;
 
+pub use file::{
+    EnvLookup, LoadedConfig, Secret, default_config_path_with, default_data_dir_with, process_env,
+    resolve_secret,
+};
 pub use ollama::OllamaConfig;
+pub use validate::{Issue, ValidationReport, is_valid_source_id};
 
 /// How this installation operates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -169,34 +177,14 @@ pub const ENV_HOME: &str = "ANCHOR_HOME";
 /// Environment variable overriding the configuration file path.
 pub const ENV_CONFIG: &str = "ANCHOR_CONFIG";
 
-fn project_dirs() -> Option<directories::ProjectDirs> {
-    directories::ProjectDirs::from("dev", "anchor", "anchor")
-}
-
-/// Default data directory: `$ANCHOR_HOME`, else the platform's local data directory
-/// (`~/.local/share/anchor` on Linux), else `./.anchor`.
+/// Default data directory in the real process environment; see [`default_data_dir_with`].
 pub fn default_data_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os(ENV_HOME).filter(|value| !value.is_empty()) {
-        return PathBuf::from(home);
-    }
-    project_dirs()
-        .map(|dirs| dirs.data_local_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".anchor"))
+    default_data_dir_with(&process_env)
 }
 
-/// Default configuration file: `$ANCHOR_CONFIG`, else `$ANCHOR_HOME/anchor.toml` when
-/// `ANCHOR_HOME` is set, else the platform's configuration directory
-/// (`~/.config/anchor/anchor.toml` on Linux), else `./anchor.toml`.
+/// Default configuration file in the real process environment; see [`default_config_path_with`].
 pub fn default_config_path() -> PathBuf {
-    if let Some(path) = std::env::var_os(ENV_CONFIG).filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
-    }
-    if let Some(home) = std::env::var_os(ENV_HOME).filter(|value| !value.is_empty()) {
-        return PathBuf::from(home).join("anchor.toml");
-    }
-    project_dirs()
-        .map(|dirs| dirs.config_dir().join("anchor.toml"))
-        .unwrap_or_else(|| PathBuf::from("anchor.toml"))
+    default_config_path_with(&process_env)
 }
 
 /// Filesystem layout of an Anchor data directory.
