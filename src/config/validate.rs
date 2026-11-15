@@ -480,18 +480,20 @@ mod tests {
     fn source_rules() {
         let dir = tempfile::tempdir().expect("tempdir");
         let existing = dir.path().to_string_lossy().into_owned();
-        let mut config = AnchorConfig::default();
-        config.sources = vec![
-            SourceConfig::new("ok.repo_1", SourceKind::Repo, existing.clone()),
-            SourceConfig::new("Bad Id", SourceKind::Repo, existing.clone()),
-            SourceConfig::new(
-                "ok.repo_1",
-                SourceKind::Wiki,
-                dir.path().join("missing").to_string_lossy(),
-            ),
-            SourceConfig::new("remote", SourceKind::Jira, "https://jira.example.test"),
-            SourceConfig::new("-lead", SourceKind::Jira, " "),
-        ];
+        let mut config = AnchorConfig {
+            sources: vec![
+                SourceConfig::new("ok.repo_1", SourceKind::Repo, existing.clone()),
+                SourceConfig::new("Bad Id", SourceKind::Repo, existing.clone()),
+                SourceConfig::new(
+                    "ok.repo_1",
+                    SourceKind::Wiki,
+                    dir.path().join("missing").to_string_lossy(),
+                ),
+                SourceConfig::new("remote", SourceKind::Jira, "https://jira.example.test"),
+                SourceConfig::new("-lead", SourceKind::Jira, " "),
+            ],
+            ..AnchorConfig::default()
+        };
         config.sources[0].include = vec!["src/{a".to_owned()];
         let report = config.validate();
         assert!(has(&report.errors, "sources[1].id"));

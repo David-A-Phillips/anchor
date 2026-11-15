@@ -139,6 +139,7 @@ impl CostModel {
     }
 
     /// The smaller of the two multipliers (a lower bound for any element).
+    #[cfg(test)]
     pub(super) fn min_multiplier(&self) -> f32 {
         self.source_of_truth.min(self.reference_only)
     }

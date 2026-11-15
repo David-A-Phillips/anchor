@@ -62,7 +62,7 @@ pub fn key_hash(key: &UnitKey) -> ContentHash {
 
 fn nibble(hash: &ContentHash, depth: usize) -> usize {
     let byte = hash.as_bytes()[depth / 2];
-    usize::from(if depth % 2 == 0 {
+    usize::from(if depth.is_multiple_of(2) {
         byte >> 4
     } else {
         byte & 0x0f
@@ -389,7 +389,7 @@ impl MerkleTree {
     pub fn from_metas(metas: impl IntoIterator<Item = UnitMeta>) -> Self {
         let mut entries: Vec<Entry> = metas.into_iter().map(Entry::new).collect();
         // Stable sort, so that among equal keys the last one given ends up last.
-        entries.sort_by(|a, b| a.key_hash.cmp(&b.key_hash));
+        entries.sort_by_key(|e| e.key_hash);
         let mut unique: Vec<Entry> = Vec::with_capacity(entries.len());
         for entry in entries {
             match unique.last_mut() {
@@ -697,7 +697,7 @@ impl<'a> DiffSession<'a> {
             }
             NodeBody::Leaf { entries } => {
                 let mut remote_entries: Vec<Entry> = entries.into_iter().map(Entry::new).collect();
-                remote_entries.sort_by(|a, b| a.key_hash.cmp(&b.key_hash));
+                remote_entries.sort_by_key(|e| e.key_hash);
                 if remote_entries.iter().any(|e| !path.covers(&e.key_hash)) {
                     return Err(Error::sync(format!(
                         "tree node `{path}` lists entries that do not belong to it"
@@ -1036,6 +1036,8 @@ pub(crate) mod tests {
         let mut source = Counting::new(&remote);
         let found = diff_async(&local, &ns(), &mut source).await.expect("diff");
         assert_eq!(found, expected);
-        assert_eq!(found.len(), 5 + 5 + 3);
+        // 5 only local (0..5), 5 only remote (3000..3005), and 2 version differences in the
+        // overlap (1000 and 2000; 0 and 3000 are one-sided).
+        assert_eq!(found.len(), 5 + 5 + 2);
     }
 }

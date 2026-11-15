@@ -262,7 +262,8 @@ impl TieredRouter {
                     .as_ref()
                     .map_or(0.0, |tracker| tracker.cloud_spend_today_usd());
                 // `!(spent < cap)` also stops on a NaN from either side.
-                if cap <= 0.0 || !(spent < cap) {
+                if cap <= 0.0 || !matches!(spent.partial_cmp(&cap), Some(std::cmp::Ordering::Less))
+                {
                     return Err(System2Block::BudgetExhausted);
                 }
             }
