@@ -158,7 +158,17 @@ impl IncrementalParser {
                 if let Some(edit) = compute_edit(&entry.text, text) {
                     entry.tree.edit(&edit);
                 }
-                let tree = parser.parse(text, Some(&entry.tree));
+                // Tree-sitter's error recovery is not guaranteed to produce the same tree
+                // incrementally as from scratch. When either side of the edit has syntax errors,
+                // re-parse from scratch so results never depend on the edit history.
+                let reuse = !entry.tree.root_node().has_error();
+                let mut tree = parser.parse(text, reuse.then_some(&entry.tree));
+                if tree
+                    .as_ref()
+                    .is_some_and(|new| reuse && new.root_node().has_error())
+                {
+                    tree = parser.parse(text, None);
+                }
                 let ranges = tree
                     .as_ref()
                     .map(|new| {
