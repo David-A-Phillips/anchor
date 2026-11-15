@@ -1,5 +1,6 @@
 //! Command-line interface (`anchor <command>`).
 
+pub mod eval;
 pub mod fetch;
 
 use std::path::PathBuf;
@@ -88,6 +89,21 @@ enum Command {
     },
     /// List open gap-analysis backlog items.
     Backlog,
+    /// Score the engine against questions with known answers (see `anchor demo`).
+    Eval {
+        /// The ground-truth file (`ground_truth.json`).
+        #[arg(long)]
+        truth: PathBuf,
+        /// Never call the cloud tier.
+        #[arg(long)]
+        local_only: bool,
+        /// Retrieval only: no model call for answers.
+        #[arg(long)]
+        retrieval_only: bool,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export a GitHub repository's issues, discussions and pull-request reviews (needs `gh`).
     Fetch {
         /// `owner/name` of the repository; omit to refresh every `[[github]]` entry.
@@ -785,6 +801,32 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!(
                 "To keep it refreshed by the daemon, also add:\n\n[[github]]\nrepository = \"{repository}\"\ninterval_minutes = 60"
             );
+        }
+        Command::Eval {
+            truth,
+            local_only,
+            retrieval_only,
+            json,
+        } => {
+            let (config, _) = load_config(&cli.config)?;
+            let truth: crate::synth::GroundTruth =
+                serde_json::from_str(&std::fs::read_to_string(&truth)?)?;
+            let engine = open_engine(config).await?;
+            let mode = if retrieval_only {
+                QueryMode::RetrievalOnly
+            } else if local_only {
+                QueryMode::LocalOnly
+            } else {
+                QueryMode::Auto
+            };
+            let report =
+                eval::evaluate(&query_engine(&engine), &engine.ledger(), &truth, mode).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", eval::render(&report));
+            }
+            engine.flush()?;
         }
         Command::Ollama { action } => {
             let (mut config, path) = load_config(&cli.config)?;
