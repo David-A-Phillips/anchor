@@ -16,6 +16,10 @@ use crate::engine::query::{QueryDeps, QueryEngine, QueryMode, QueryRequest};
 use crate::engine::watcher::FileWatcher;
 use crate::engine::{Engine, EngineEvent};
 use crate::metrics::{TimeRange, format_usd};
+use crate::sync::identity::{DeviceIdentity, TrustPolicy, TrustedDevices};
+use crate::sync::{
+    ClientOptions, GraphUnitStore, ServerOptions, SyncClient, SyncServer, token_from_env,
+};
 
 /// Anchor: a local-first context engine that grounds AI models in your code, docs and org.
 #[derive(Debug, Parser)]
@@ -83,6 +87,10 @@ enum Command {
         /// The pack file.
         file: PathBuf,
     },
+    /// Run the central sync server (WebSocket and gRPC on `sync.listen`).
+    Server,
+    /// Synchronise once with the configured sync server and print the result.
+    Sync,
     /// Manage the local Ollama backend.
     Ollama {
         #[command(subcommand)]
@@ -156,6 +164,30 @@ fn load_config(path: &Option<PathBuf>) -> Result<(AnchorConfig, PathBuf)> {
 
 async fn open_engine(config: AnchorConfig) -> Result<Arc<Engine>> {
     tokio::task::spawn_blocking(move || Engine::open(config)).await?
+}
+
+/// The engine's store as a sync store; applied units flow into the in-memory graph.
+fn graph_unit_store(engine: &Arc<Engine>) -> Arc<GraphUnitStore> {
+    let sink = engine.clone();
+    Arc::new(GraphUnitStore::new(
+        engine.store().clone(),
+        Arc::new(move |outcome| {
+            if let Err(err) = sink.absorb(outcome) {
+                tracing::warn!("cannot absorb a synced unit: {err}");
+            }
+        }),
+    ))
+}
+
+/// Trusted device keys when any are configured; otherwise every valid signature is accepted
+/// (the bearer token still gates access).
+fn trust_policy(keys_dir: &std::path::Path) -> Result<TrustPolicy> {
+    let devices = TrustedDevices::open(keys_dir)?;
+    Ok(if devices.list().is_empty() {
+        TrustPolicy::AnyValid
+    } else {
+        devices.policy()
+    })
 }
 
 fn query_engine(engine: &Engine) -> QueryEngine {
@@ -396,6 +428,47 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let engine = open_engine(config).await?;
             let applied = tokio::task::spawn_blocking(move || engine.import_pack(&file)).await??;
             println!("Applied {applied} unit versions.");
+        }
+        Command::Server => {
+            let (config, _) = load_config(&cli.config)?;
+            let listen = config.sync.listen.clone();
+            let token = token_from_env(config.sync.auth_token_env.as_deref(), |name| {
+                std::env::var(name).ok()
+            });
+            let engine = open_engine(config).await?;
+            let keys_dir = engine.paths().keys_dir();
+            let identity = Arc::new(DeviceIdentity::load_or_create(&keys_dir)?);
+            let mut options = ServerOptions::new(identity, token);
+            options.trust = trust_policy(&keys_dir)?;
+            let listener = tokio::net::TcpListener::bind(&listen).await?;
+            println!(
+                "Sync server listening on {} (device {}).",
+                listener.local_addr()?,
+                options.identity.device_id()
+            );
+            SyncServer::serve(listener, graph_unit_store(&engine), options, async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await?;
+        }
+        Command::Sync => {
+            let (config, _) = load_config(&cli.config)?;
+            let token = token_from_env(config.sync.auth_token_env.as_deref(), |name| {
+                std::env::var(name).ok()
+            });
+            let sync = config.sync.clone();
+            let engine = open_engine(config).await?;
+            let keys_dir = engine.paths().keys_dir();
+            let identity = Arc::new(DeviceIdentity::load_or_create(&keys_dir)?);
+            let options =
+                ClientOptions::from_config(&sync, identity, token, trust_policy(&keys_dir)?)?;
+            let report = SyncClient::new(graph_unit_store(&engine), options)
+                .sync_once()
+                .await?;
+            println!(
+                "Pushed {} and pulled {} unit versions ({} rejected, {} bytes) in {:.2?}.",
+                report.pushed, report.pulled, report.rejected, report.bytes, report.duration
+            );
         }
         Command::Ollama { action } => {
             let (mut config, path) = load_config(&cli.config)?;
