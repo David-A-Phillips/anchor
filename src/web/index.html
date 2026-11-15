@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anchor</title>
+<style>
+:root { --bg:#f6f7f9; --fg:#1b1f24; --muted:#667085; --card:#fff; --line:#e3e6ea; --accent:#2f6fed; --sot:#12805c; --ref:#b25e09; }
+@media (prefers-color-scheme: dark) { :root { --bg:#111418; --fg:#e7eaee; --muted:#98a2b3; --card:#1a1e24; --line:#2a3038; --accent:#6ea0ff; --sot:#4cc79a; --ref:#f0a653; } }
+* { box-sizing: border-box; }
+body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+header { display:flex; gap:16px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+header h1 { font-size:16px; margin:0 12px 0 0; }
+nav button { background:none; border:0; color:var(--muted); padding:6px 10px; cursor:pointer; font:inherit; border-radius:6px; }
+nav button.on { color:var(--fg); background:var(--line); }
+main { padding:16px; max-width:1100px; margin:0 auto; }
+section { display:none; } section.on { display:block; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:12px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; }
+.num { font-size:22px; font-weight:600; } .label { color:var(--muted); font-size:12px; }
+input, select, textarea { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); }
+button.act { font:inherit; padding:7px 12px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
+table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:500; font-size:12px; }
+.badge { font-size:11px; padding:1px 6px; border-radius:10px; border:1px solid currentColor; white-space:nowrap; }
+.source_of_truth { color:var(--sot); } .reference_only { color:var(--ref); }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+pre { white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.45 ui-monospace, monospace; }
+a { color:var(--accent); cursor:pointer; }
+.muted { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Anchor</h1>
+  <nav id="nav"></nav>
+</header>
+<main>
+  <section id="overview"><div class="grid" id="counts"></div><div class="card"><h3>Sources</h3><table id="sources"></table></div><div class="card"><h3>Nodes by kind</h3><table id="kinds"></table></div></section>
+  <section id="graph">
+    <div class="row"><input id="q" placeholder="Search nodes by name…" size="40"><button class="act" id="go">Search</button></div>
+    <div class="card"><table id="results"></table></div>
+    <div class="card" id="detail"><span class="muted">Select a node to see its attributes, sources, edges and text.</span></div>
+    <div class="card"><div class="row"><input id="from" placeholder="from node id" size="12"><input id="to" placeholder="to node id" size="12"><button class="act" id="pathgo">Find trust-weighted path</button></div><pre id="pathout"></pre></div>
+  </section>
+  <section id="query">
+    <div class="row"><input id="question" placeholder="Who owns API X?  Why is PAY-123 blocked?" size="60"><select id="mode"><option value="auto">auto</option><option value="local_only">local only</option><option value="retrieval_only">retrieval only</option></select><button class="act" id="ask">Ask</button></div>
+    <div class="card"><h3>Answer</h3><div id="answer" class="muted">—</div><p class="muted" id="meta"></p></div>
+    <div class="card"><h3>Context</h3><table id="context"></table></div>
+    <div class="card"><h3>Conflicts and gaps</h3><div id="conflicts" class="muted">—</div></div>
+  </section>
+  <section id="backlog"><div class="card"><table id="items"></table></div></section>
+  <section id="spend"><div class="grid" id="spendcards"></div><div class="card"><h3>Per model</h3><table id="models"></table></div><div class="card"><h3>Recent calls</h3><table id="recent"></table></div></section>
+  <section id="export"><div class="card"><p>Download a signed <code>.contextpack</code> snapshot of every source.</p><button class="act" id="dl">Export snapshot</button> <span id="dlmsg" class="muted"></span></div></section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, text, cls) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = String(text); if (cls) e.className = cls; return e; };
+const api = async (path, opts) => { const r = await fetch(path, opts); const body = await r.json(); if (!r.ok) throw new Error(body.error ? body.error.message : r.statusText); return body; };
+const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+const badge = (trust) => el("span", trust.replace(/_/g, " "), "badge " + trust);
+const row = (table, cells, head) => { const tr = el("tr"); for (const c of cells) { const td = el(head ? "th" : "td"); if (c instanceof Node) td.appendChild(c); else td.textContent = c === null || c === undefined ? "" : String(c); tr.appendChild(td); } table.appendChild(tr); return tr; };
+const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
+const tabs = ["overview", "graph", "query", "backlog", "spend", "export"];
+const loaders = {};
+function show(tab) { for (const t of tabs) { $(t).classList.toggle("on", t === tab); $("tab-" + t).classList.toggle("on", t === tab); } if (loaders[tab]) loaders[tab]().catch((e) => alert(e.message)); }
+for (const t of tabs) { const b = el("button", t[0].toUpperCase() + t.slice(1)); b.id = "tab-" + t; b.onclick = () => show(t); $("nav").appendChild(b); }
+const card = (label, value) => { const c = el("div", undefined, "card"); c.appendChild(el("div", value, "num")); c.appendChild(el("div", label, "label")); return c; };
+
+loaders.overview = async () => {
+  const s = await api("/api/stats");
+  clear($("counts"));
+  for (const [label, value] of [["nodes", s.store.node_count], ["edges", s.store.edge_count], ["units", s.store.unit_count], ["chunks", s.store.chunk_count], ["pending references", s.store.pending_edges], ["database MB", (s.store.db_bytes / 1e6).toFixed(1)], ["graph memory MB", (s.graph.memory_bytes / 1e6).toFixed(1)], ["change→graph p95 ms", (s.latency.p95_us / 1000).toFixed(1)]]) $("counts").appendChild(card(label, value));
+  clear($("sources")); row($("sources"), ["id", "kind", "trust", ""], true);
+  for (const src of s.sources) { const b = el("a", "rescan"); b.onclick = async () => { b.textContent = "scanning…"; try { await post("/api/sources/" + encodeURIComponent(src.id) + "/rescan"); } catch (e) { alert(e.message); } loaders.overview(); }; row($("sources"), [src.id, src.kind, badge(src.trust), b]); }
+  clear($("kinds")); for (const [k, n] of Object.entries(s.store.nodes)) row($("kinds"), [k, n]);
+};
+
+async function openNode(id) {
+  const d = await api("/api/graph/node/" + id);
+  const names = new Map(d.neighbors.map((n) => [n.id, n]));
+  const box = $("detail"); clear(box);
+  const h = el("h3", d.node.name + " "); h.appendChild(badge(d.node.trust)); box.appendChild(h);
+  box.appendChild(el("p", d.node.kind + " · " + d.node.keys.join(", ") + " · id " + d.node.id + " · sources: " + d.node.sources.join(", "), "muted"));
+  box.appendChild(el("pre", JSON.stringify(d.node.attrs, null, 1)));
+  const t = el("table"); row(t, ["edge", "direction", "other node", "trust", "claimed by"], true);
+  for (const e of d.edges) { const out = e.from === d.node.id; const other = names.get(out ? e.to : e.from); const a = el("a", other ? other.name + " (" + other.kind + ")" : "?"); if (other) a.onclick = () => openNode(other.id); row(t, [e.kind, out ? "→" : "←", a, badge(e.trust), e.claims.map((c) => c.source).join(", ")]); }
+  box.appendChild(t);
+  for (const c of d.chunks.slice(0, 6)) { const p = el("pre", c.text); p.style.marginTop = "8px"; box.appendChild(el("div", c.kind + " · " + c.source, "label")); box.appendChild(p); }
+}
+$("go").onclick = async () => { try { const nodes = await api("/api/graph/search?q=" + encodeURIComponent($("q").value)); clear($("results")); row($("results"), ["id", "name", "kind", "key", "trust"], true); for (const n of nodes) { const a = el("a", n.name); a.onclick = () => openNode(n.id).catch((e) => alert(e.message)); row($("results"), [n.id, a, n.kind, n.key, badge(n.trust)]); } } catch (e) { alert(e.message); } };
+$("q").onkeydown = (e) => { if (e.key === "Enter") $("go").onclick(); };
+$("pathgo").onclick = async () => { try { const p = await api("/api/graph/path?from=" + encodeURIComponent($("from").value) + "&to=" + encodeURIComponent($("to").value)); const names = new Map(p.nodes.map((n) => [n.id, n.name])); let out = names.get(p.path.nodes[0]); p.path.steps.forEach((s, i) => { out += "\n  " + (s.direction === "forward" ? "—" + s.kind + "→ " : "←" + s.kind + "— ") + names.get(p.path.nodes[i + 1]) + "  [" + s.trust + "]"; }); $("pathout").textContent = out + "\ncost: " + JSON.stringify(p.path.cost); } catch (e) { $("pathout").textContent = e.message; } };
+
+$("ask").onclick = async () => {
+  $("answer").textContent = "…";
+  try {
+    const r = await post("/api/query", { query: $("question").value, mode: $("mode").value });
+    $("answer").textContent = r.answer || "(no answer; see context)"; $("answer").className = "";
+    $("meta").textContent = "intent " + r.intent.kind + " (" + r.intent.classifier + ") · confidence " + r.confidence.toFixed(2) + " · tier " + (r.route.tier || "none") + " · " + r.route.reason + " · " + r.timings_ms.total + " ms · tokens " + r.usage.reduce((a, u) => a + u.prompt_tokens + u.completion_tokens, 0);
+    clear($("context")); row($("context"), ["role", "node", "kind", "trust", "evidence"], true);
+    for (const item of r.context.items) { const a = el("a", item.node.name); a.onclick = () => { show("graph"); openNode(item.node.id); }; const ev = item.path.map((s) => s.from.name + " " + (s.direction === "forward" ? "—" + s.edge + "→" : "←" + s.edge + "—") + " " + s.to.name).join("; ") || (item.snippets[0] ? item.snippets[0].text.slice(0, 160) : ""); row($("context"), [item.role, a, item.node.kind, badge(item.node.trust), ev]); }
+    clear($("conflicts"));
+    for (const c of r.context.conflicts) $("conflicts").appendChild(el("p", "Conflict: " + c.explanation));
+    for (const g of r.gaps) $("conflicts").appendChild(el("p", g.kind + ": " + g.detail));
+    if (!$("conflicts").firstChild) $("conflicts").textContent = "none";
+  } catch (e) { $("answer").textContent = e.message; }
+};
+$("question").onkeydown = (e) => { if (e.key === "Enter") $("ask").onclick(); };
+
+loaders.backlog = async () => {
+  const b = await api("/api/backlog"); const t = $("items"); clear(t); row(t, ["#", "kind", "status", "hits", "priority", "what", ""], true);
+  for (const i of b.items) { const acts = el("span"); for (const act of ["resolve", "dismiss", "retry"]) { const a = el("a", act + " "); a.onclick = async () => { try { await post("/api/backlog/" + i.id + "/" + act); } catch (e) { alert(e.message); } loaders.backlog(); }; acts.appendChild(a); } row(t, [i.id, i.kind, i.status, i.hits, i.priority.toFixed(2), i.query || i.gap_key, acts]); }
+  if (!b.items.length) row(t, ["", "No backlog items."]);
+};
+
+loaders.spend = async () => {
+  const s = await api("/api/spend"); const usd = (n) => "$" + (n / 1e9).toFixed(4);
+  clear($("spendcards")); const by = s.summary.by_locality || s.summary;
+  for (const loc of ["local", "cloud"]) { const u = by[loc] || {}; $("spendcards").appendChild(card(loc + " calls", u.calls || 0)); $("spendcards").appendChild(card(loc + " tokens", (u.prompt_tokens || 0) + (u.completion_tokens || 0))); $("spendcards").appendChild(card(loc + " cost", usd(u.cost_nanos || 0))); }
+  clear($("models")); row($("models"), ["model", "details"], true); for (const m of s.models) row($("models"), [m.model || "", JSON.stringify(m)]);
+  clear($("recent")); row($("recent"), ["when", "tier", "locality", "model", "purpose", "in", "out", "ms"], true);
+  for (const r of s.recent) row($("recent"), [new Date(r.timestamp_ms).toLocaleString(), r.tier, r.locality, r.model, r.purpose, r.prompt_tokens, r.completion_tokens, r.latency_ms]);
+};
+
+$("dl").onclick = async () => { $("dlmsg").textContent = "exporting…"; try { const r = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); if (!r.ok) throw new Error((await r.json()).error.message); const blob = await r.blob(); const name = (r.headers.get("Content-Disposition") || "").split('filename="')[1]; const a = el("a"); a.href = URL.createObjectURL(blob); a.download = name ? name.slice(0, -1) : "snapshot.contextpack"; a.click(); $("dlmsg").textContent = "saved " + a.download + " (" + blob.size + " bytes)"; } catch (e) { $("dlmsg").textContent = e.message; } };
+show("overview");
+</script>
+</body>
+</html>

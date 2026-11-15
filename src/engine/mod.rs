@@ -12,6 +12,7 @@
 //! * [`watcher`] — file watching (notify) feeding the pipeline;
 //! * [`query`] — the query engine tying everything together.
 
+pub mod core;
 pub mod embed;
 pub mod graph;
 pub mod ingest;
@@ -21,3 +22,5 @@ pub mod query;
 pub mod router;
 pub mod store;
 pub mod watcher;
+
+pub use core::{Engine, EngineEvent, LatencyStats, ScanReport};
