@@ -5,8 +5,9 @@
 //! with default owners, inherits the defaults). GitLab `[Section]` headers split the file into
 //! independent rule lists: every section contributes its own last match.
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::GlobBuilder;
 
+use super::pathindex::{PathIndex, PathIndexBuilder};
 use super::{OwnerMatch, OwnerRole, Parties};
 use crate::base::{Error, Result};
 use crate::engine::ingest::{IngestWarning, party};
@@ -20,9 +21,8 @@ struct Rule {
 /// Compiled CODEOWNERS rules.
 pub(super) struct Compiled {
     rules: Vec<Rule>,
-    set: GlobSet,
-    /// Rule index of each glob in `set` (a pattern may compile to two globs).
-    glob_rule: Vec<u32>,
+    /// Reports rule indices (a pattern may compile to two globs).
+    index: PathIndex,
 }
 
 struct Section {
@@ -131,8 +131,7 @@ pub(super) fn parse(
     }];
     let mut current = 0usize;
     let mut rules = Vec::new();
-    let mut builder = GlobSetBuilder::new();
-    let mut glob_rule = Vec::new();
+    let mut builder = PathIndexBuilder::default();
 
     let mut owners_of = |tokens: &[String], line: usize, warnings: &mut Vec<IngestWarning>| {
         let mut owners = Vec::new();
@@ -186,12 +185,13 @@ pub(super) fn parse(
         let mut globs = Vec::new();
         let mut valid = true;
         for glob in globs_for(pattern) {
+            // Validate before registering anything, so a rule is indexed entirely or not at all.
             match GlobBuilder::new(&glob)
                 .literal_separator(true)
                 .backslash_escape(true)
                 .build()
             {
-                Ok(glob) => globs.push(glob),
+                Ok(_) => globs.push(glob),
                 Err(err) => {
                     warnings.push(IngestWarning::new(
                         format!("line {line_no}"),
@@ -219,9 +219,10 @@ pub(super) fn parse(
         }
         let rule = u32::try_from(rules.len())
             .map_err(|_| Error::invalid("CODEOWNERS file has too many rules"))?;
-        for glob in globs {
-            builder.add(glob);
-            glob_rule.push(rule);
+        for glob in &globs {
+            builder
+                .add(glob, true, rule)
+                .map_err(|err| Error::parse(format!("CODEOWNERS line {line_no}: {err}")))?;
         }
         rules.push(Rule {
             owners,
@@ -229,14 +230,10 @@ pub(super) fn parse(
             description,
         });
     }
-    let set = builder
+    let index = builder
         .build()
         .map_err(|err| Error::parse(format!("CODEOWNERS patterns: {err}")))?;
-    Ok(Compiled {
-        rules,
-        set,
-        glob_rule,
-    })
+    Ok(Compiled { rules, index })
 }
 
 impl Compiled {
@@ -244,8 +241,9 @@ impl Compiled {
         // Last matching rule per section; files rarely have more than a handful of sections, so
         // a linear scan of this small vector beats a map.
         let mut winners: Vec<(u32, u32)> = Vec::new();
-        for glob in self.set.matches(path) {
-            let rule = self.glob_rule[glob];
+        let mut hits = Vec::new();
+        self.index.matches(path, &mut hits);
+        for rule in hits {
             let section = self.rules[rule as usize].section;
             match winners.iter_mut().find(|(s, _)| *s == section) {
                 Some(winner) => winner.1 = winner.1.max(rule),

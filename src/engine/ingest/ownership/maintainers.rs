@@ -6,9 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::{Regex, RegexSet};
 
+use super::pathindex::{PathIndex, PathIndexBuilder};
 use super::{OwnerMatch, OwnerRole, Parties};
 use crate::base::{Error, NodeAssertion, NodeKey, NodeKind, Result, attrs, keys};
 use crate::engine::ingest::{IngestWarning, party::PersonIdentity};
@@ -30,11 +30,12 @@ pub(super) struct Entry {
 /// Compiled MAINTAINERS entries.
 pub(super) struct Compiled {
     pub(super) entries: Vec<Entry>,
-    files: GlobSet,
-    /// `(entry, index into entry.files)` of each glob in `files`.
+    /// Reports indices into `file_origin`.
+    files: PathIndex,
+    /// `(entry, index into entry.files)` of each registered `F:` pattern.
     file_origin: Vec<(u32, u32)>,
-    excluded: GlobSet,
-    excluded_entry: Vec<u32>,
+    /// Reports entry indices.
+    excluded: PathIndex,
     names: RegexSet,
     /// `(entry, index into entry.name_patterns)` of each regex in `names`.
     name_origin: Vec<(u32, u32)>,
@@ -97,29 +98,20 @@ fn globs_for(pattern: &str) -> Vec<String> {
 }
 
 fn add_globs(
-    builder: &mut GlobSetBuilder,
+    builder: &mut PathIndexBuilder,
     pattern: &str,
+    id: u32,
     line: usize,
     warnings: &mut Vec<IngestWarning>,
-) -> usize {
-    let mut added = 0;
+) {
     for glob in globs_for(pattern) {
-        match GlobBuilder::new(&glob)
-            .literal_separator(true)
-            .backslash_escape(false)
-            .build()
-        {
-            Ok(glob) => {
-                builder.add(glob);
-                added += 1;
-            }
-            Err(err) => warnings.push(IngestWarning::new(
+        if let Err(err) = builder.add(&glob, false, id) {
+            warnings.push(IngestWarning::new(
                 format!("line {line}"),
                 format!("ignored invalid pattern `{pattern}`: {err}"),
-            )),
+            ));
         }
     }
-    added
 }
 
 /// The Team assertion of an `L:` line: the address is the identity (two lists may share a local
@@ -150,10 +142,9 @@ pub(super) fn parse(
     warnings: &mut Vec<IngestWarning>,
 ) -> Result<Compiled> {
     let mut entries: Vec<Entry> = Vec::new();
-    let mut files = GlobSetBuilder::new();
-    let mut file_origin = Vec::new();
-    let mut excluded = GlobSetBuilder::new();
-    let mut excluded_entry = Vec::new();
+    let mut files = PathIndexBuilder::default();
+    let mut file_origin: Vec<(u32, u32)> = Vec::new();
+    let mut excluded = PathIndexBuilder::default();
     let mut names = Vec::new();
     let mut name_origin = Vec::new();
 
@@ -223,16 +214,14 @@ pub(super) fn parse(
                 entry.status.get_or_insert_with(|| value.to_owned());
             }
             'F' => {
-                let pattern = entry.files.len() as u32;
-                for _ in 0..add_globs(&mut files, value, line_no, warnings) {
-                    file_origin.push((entry_index, pattern));
-                }
+                let id = u32::try_from(file_origin.len())
+                    .map_err(|_| Error::invalid("MAINTAINERS file has too many patterns"))?;
+                file_origin.push((entry_index, entry.files.len() as u32));
+                add_globs(&mut files, value, id, line_no, warnings);
                 entry.files.push(value.to_owned());
             }
             'X' => {
-                for _ in 0..add_globs(&mut excluded, value, line_no, warnings) {
-                    excluded_entry.push(entry_index);
-                }
+                add_globs(&mut excluded, value, entry_index, line_no, warnings);
                 entry.excluded.push(value.to_owned());
             }
             'N' => {
@@ -258,7 +247,7 @@ pub(super) fn parse(
         }
     }
 
-    let build = |builder: GlobSetBuilder| {
+    let build = |builder: PathIndexBuilder| {
         builder
             .build()
             .map_err(|err| Error::parse(format!("MAINTAINERS patterns: {err}")))
@@ -268,7 +257,6 @@ pub(super) fn parse(
         files: build(files)?,
         file_origin,
         excluded: build(excluded)?,
-        excluded_entry,
         names: RegexSet::new(&names)
             .map_err(|err| Error::parse(format!("MAINTAINERS name patterns: {err}")))?,
         name_origin,
@@ -278,12 +266,12 @@ pub(super) fn parse(
 impl Compiled {
     pub(super) fn matches(&self, path: &str, parties: &Parties, out: &mut Vec<OwnerMatch>) {
         // (entry, is N pattern, pattern index); sorted so each entry keeps its first F pattern.
-        let mut hits: Vec<(u32, bool, u32)> = self
-            .files
-            .matches(path)
-            .into_iter()
-            .map(|glob| {
-                let (entry, pattern) = self.file_origin[glob];
+        let mut ids = Vec::new();
+        self.files.matches(path, &mut ids);
+        let mut hits: Vec<(u32, bool, u32)> = ids
+            .iter()
+            .map(|&id| {
+                let (entry, pattern) = self.file_origin[id as usize];
                 (entry, false, pattern)
             })
             .collect();
@@ -298,12 +286,8 @@ impl Compiled {
         }
         hits.sort_unstable();
         hits.dedup_by_key(|hit| hit.0);
-        let excluded: Vec<u32> = self
-            .excluded
-            .matches(path)
-            .into_iter()
-            .map(|glob| self.excluded_entry[glob])
-            .collect();
+        let mut excluded = Vec::new();
+        self.excluded.matches(path, &mut excluded);
         for (entry_index, by_name, pattern) in hits {
             if excluded.contains(&entry_index) {
                 continue;

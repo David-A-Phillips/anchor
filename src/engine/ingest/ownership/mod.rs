@@ -21,6 +21,7 @@
 mod codeowners;
 mod maintainers;
 mod owners;
+mod pathindex;
 
 use std::collections::HashMap;
 
