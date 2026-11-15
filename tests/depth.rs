@@ -169,3 +169,80 @@ fn depth_survives_a_restart_and_never_gets_shallower() {
         .unwrap();
     assert_eq!(again.depth(&SourceId::new("payments-api")), Depth::Map);
 }
+
+/// Measures what each depth costs and what it can answer, on the synthetic enterprise with known
+/// answers. Run with `--nocapture` to see the table.
+#[tokio::test(flavor = "multi_thread")]
+async fn depth_trades_footprint_for_recall() {
+    use anchor::engine::query::QueryMode;
+    use anchor::synth::{GroundTruth, Preset, SynthSpec, generate};
+
+    let data = tempfile::tempdir().unwrap();
+    generate(&SynthSpec::preset(Preset::Small).seed(2024), data.path()).unwrap();
+    let truth: GroundTruth =
+        serde_json::from_str(&std::fs::read_to_string(data.path().join("ground_truth.json")).unwrap()).unwrap();
+
+    let mut rows = Vec::new();
+    for depth in [Depth::PhoneBook, Depth::Map, Depth::Full] {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = AnchorConfig::load(&data.path().join("anchor.toml")).unwrap();
+        config.data_dir = Some(home.path().to_path_buf());
+        config.query.on_shallow = ShallowPolicy::Manual;
+        for source in &mut config.sources {
+            source.depth = depth;
+        }
+        let engine = Engine::open(config).unwrap();
+        engine.scan_all().unwrap();
+        engine.store().db().checkpoint().unwrap();
+        let stats = engine.store().stats().unwrap();
+        let graph_bytes = engine.graph().read().memory_estimate_bytes();
+        let queries = queries(&engine);
+
+        let mut recall = Vec::new();
+        let mut flagged = 0usize;
+        let mut asked = 0usize;
+        let groups: [(&str, Vec<(String, Vec<String>)>); 3] = [
+            ("ownership", truth.ownership.iter().map(|q| (q.question.clone(), q.expected_owner_keys.clone())).collect()),
+            ("justification", truth.justification.iter().map(|q| (q.question.clone(), q.expected_keys.clone())).collect()),
+            ("relationships", truth.relationships.iter().map(|q| (q.question.clone(), q.expected_keys.clone())).collect()),
+        ];
+        for (name, questions) in groups {
+            let (mut found, mut expected) = (0usize, 0usize);
+            for (question, keys) in questions {
+                let mut request = QueryRequest::new(question);
+                request.mode = QueryMode::RetrievalOnly;
+                let response = queries.query(request).await.unwrap();
+                asked += 1;
+                flagged += usize::from(!response.shallow.is_empty());
+                expected += keys.len();
+                found += keys
+                    .iter()
+                    .filter(|key| response.context.items.iter().any(|item| &&item.node.key == key))
+                    .count();
+            }
+            recall.push((name, found as f64 / expected.max(1) as f64));
+        }
+        println!(
+            "{:<10} db {:>6.1} MB  graph {:>5.0} KB  {:>6} nodes {:>6} edges {:>6} chunks | recall own {:.2} just {:.2} rel {:.2} | flagged shallow {}/{}",
+            depth.as_str(),
+            stats.db_bytes as f64 / 1e6,
+            graph_bytes as f64 / 1e3,
+            stats.node_count,
+            stats.edge_count,
+            stats.chunk_count,
+            recall[0].1,
+            recall[1].1,
+            recall[2].1,
+            flagged,
+            asked
+        );
+        rows.push((stats.db_bytes, recall[0].1, flagged, asked));
+    }
+    // Deeper is never smaller, and full depth is never flagged shallow.
+    assert!(rows[0].0 <= rows[1].0 && rows[1].0 <= rows[2].0, "{rows:?}");
+    assert_eq!(rows[2].2, 0);
+    // Every answer from a shallow graph says so.
+    assert_eq!(rows[0].2, rows[0].3);
+    // Ownership is a phone-book question: it must already work at the top level.
+    assert!(rows[0].1 > 0.5, "ownership recall at phone-book depth: {}", rows[0].1);
+}
