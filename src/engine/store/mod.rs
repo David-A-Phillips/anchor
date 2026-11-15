@@ -74,15 +74,19 @@ CREATE TABLE edges (
     trust INTEGER NOT NULL, weight REAL NOT NULL, UNIQUE (from_id, to_id, kind)
 );
 CREATE INDEX edges_to ON edges(to_id);
+CREATE TABLE refs (
+    id INTEGER PRIMARY KEY, body TEXT NOT NULL UNIQUE, text TEXT NOT NULL
+);
+CREATE INDEX refs_text ON refs(text);
 CREATE TABLE edge_claims (
-    id INTEGER PRIMARY KEY, unit_id INTEGER NOT NULL, from_ref TEXT NOT NULL, to_ref TEXT NOT NULL,
-    from_text TEXT NOT NULL, to_text TEXT NOT NULL, kind INTEGER NOT NULL, weight REAL NOT NULL,
-    attrs TEXT NOT NULL, edge_id INTEGER
+    id INTEGER PRIMARY KEY, unit_id INTEGER NOT NULL, from_ref INTEGER NOT NULL,
+    to_ref INTEGER NOT NULL, kind INTEGER NOT NULL, weight REAL NOT NULL, attrs TEXT,
+    edge_id INTEGER
 );
 CREATE INDEX edge_claims_unit ON edge_claims(unit_id);
-CREATE INDEX edge_claims_edge ON edge_claims(edge_id);
-CREATE INDEX edge_claims_from ON edge_claims(from_text);
-CREATE INDEX edge_claims_to ON edge_claims(to_text);
+CREATE INDEX edge_claims_edge ON edge_claims(edge_id) WHERE edge_id IS NOT NULL;
+CREATE INDEX edge_claims_pending_from ON edge_claims(from_ref) WHERE edge_id IS NULL;
+CREATE INDEX edge_claims_pending_to ON edge_claims(to_ref) WHERE edge_id IS NULL;
 CREATE TABLE chunks (
     id INTEGER PRIMARY KEY, unit_id INTEGER NOT NULL, node_id INTEGER NOT NULL, node_key TEXT NOT NULL,
     ordinal INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, hash BLOB NOT NULL
@@ -682,7 +686,10 @@ fn refresh_edge(tx: &Connection, touched: &mut Touched, edge: i64) -> Result<()>
 /// must be refreshed.
 fn link_claim(tx: &Connection, touched: &mut Touched, claim: i64) -> Result<()> {
     let (from_ref, to_ref, kind, current): (String, String, i64, Option<i64>) = tx
-        .prepare_cached("SELECT from_ref, to_ref, kind, edge_id FROM edge_claims WHERE id = ?1")?
+        .prepare_cached(
+            "SELECT f.body, t.body, c.kind, c.edge_id FROM edge_claims c
+             JOIN refs f ON f.id = c.from_ref JOIN refs t ON t.id = c.to_ref WHERE c.id = ?1",
+        )?
         .query_row([claim], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?;
@@ -731,11 +738,11 @@ fn relink(tx: &Connection, touched: &mut Touched) -> Result<()> {
     for name in &names {
         // Lookups store the text as written; match its normalised forms too.
         let mut statement = tx.prepare_cached(
-            "SELECT id FROM edge_claims INDEXED BY edge_claims_from
-                 WHERE from_text IN (?1, ?2) AND edge_id IS NULL
+            "SELECT c.id FROM refs r JOIN edge_claims c INDEXED BY edge_claims_pending_from
+                 ON c.from_ref = r.id WHERE r.text IN (?1, ?2) AND c.edge_id IS NULL
              UNION
-             SELECT id FROM edge_claims INDEXED BY edge_claims_to
-                 WHERE to_text IN (?1, ?2) AND edge_id IS NULL
+             SELECT c.id FROM refs r JOIN edge_claims c INDEXED BY edge_claims_pending_to
+                 ON c.to_ref = r.id WHERE r.text IN (?1, ?2) AND c.edge_id IS NULL
              LIMIT ?3",
         )?;
         let slug = keys::slugify(name);
@@ -961,20 +968,40 @@ fn write_unit(
     Ok(true)
 }
 
+/// Interns an endpoint reference: claims store a small integer instead of repeating the JSON.
+fn intern_ref(tx: &Connection, reference: &NodeRef) -> Result<i64> {
+    let body = json(reference)?;
+    if let Some(id) = tx
+        .prepare_cached("SELECT id FROM refs WHERE body = ?1")?
+        .query_row([&body], |row| row.get(0))
+        .optional()?
+    {
+        return Ok(id);
+    }
+    tx.prepare_cached("INSERT INTO refs (body, text) VALUES (?1, ?2)")?
+        .execute(params![body, normalized_text(reference)])?;
+    Ok(tx.last_insert_rowid())
+}
+
 fn insert_edge_claim(tx: &Connection, unit_id: i64, edge: &EdgeAssertion) -> Result<()> {
+    let from = intern_ref(tx, &edge.from)?;
+    let to = intern_ref(tx, &edge.to)?;
+    let attrs = if edge.attrs.is_empty() {
+        None
+    } else {
+        Some(json(&edge.attrs)?)
+    };
     tx.prepare_cached(
-        "INSERT INTO edge_claims (unit_id, from_ref, to_ref, from_text, to_text, kind, weight, attrs, edge_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+        "INSERT INTO edge_claims (unit_id, from_ref, to_ref, kind, weight, attrs, edge_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
     )?
     .execute(params![
         unit_id,
-        json(&edge.from)?,
-        json(&edge.to)?,
-        normalized_text(&edge.from),
-        normalized_text(&edge.to),
+        from,
+        to,
         edge.kind.code(),
         f64::from(edge.weight),
-        json(&edge.attrs)?
+        attrs
     ])?;
     Ok(())
 }
@@ -1445,7 +1472,7 @@ impl GraphStore {
             return Ok(None);
         };
         let mut statement = conn.prepare_cached(
-            "SELECT u.key, u.source, s.trust, c.weight, c.attrs FROM edge_claims c
+            "SELECT u.key, u.source, s.trust, c.weight, COALESCE(c.attrs, '{}') FROM edge_claims c
              JOIN units u ON u.id = c.unit_id JOIN sources s ON s.id = u.source
              WHERE c.edge_id = ?1 ORDER BY s.trust DESC, u.key",
         )?;
@@ -1672,7 +1699,8 @@ impl GraphStore {
     pub fn pending_edges(&self, limit: usize) -> Result<Vec<PendingEdge>> {
         self.db.read(|conn| {
             let mut statement = conn.prepare_cached(
-                "SELECT u.key, c.kind, c.from_ref, c.to_ref FROM edge_claims c JOIN units u ON u.id = c.unit_id
+                "SELECT u.key, c.kind, f.body, t.body FROM edge_claims c JOIN units u ON u.id = c.unit_id
+                 JOIN refs f ON f.id = c.from_ref JOIN refs t ON t.id = c.to_ref
                  WHERE c.edge_id IS NULL ORDER BY c.id LIMIT ?1",
             )?;
             let rows = statement.query_map([limit as i64], |row| {
@@ -1691,6 +1719,32 @@ impl GraphStore {
                 }
             }
             Ok(out)
+        })
+    }
+
+    /// Drops the pending edge claims of `source` whose kind is one of `kinds` (after a scan:
+    /// references into code that is not part of the graph, such as standard libraries). The units
+    /// keep the assertions, so [`GraphStore::rebuild`] or re-ingesting a file restores them.
+    pub fn prune_pending(&self, source: &SourceId, kinds: &[EdgeKind]) -> Result<usize> {
+        let codes: Vec<String> = kinds.iter().map(|kind| kind.code().to_string()).collect();
+        if codes.is_empty() {
+            return Ok(0);
+        }
+        self.db.transaction(|tx| {
+            let removed = tx.execute(
+                &format!(
+                    "DELETE FROM edge_claims WHERE edge_id IS NULL AND kind IN ({})
+                     AND unit_id IN (SELECT id FROM units WHERE source = ?1)",
+                    codes.join(",")
+                ),
+                [source.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM refs WHERE id NOT IN (SELECT from_ref FROM edge_claims)
+                 AND id NOT IN (SELECT to_ref FROM edge_claims)",
+                [],
+            )?;
+            Ok(removed)
         })
     }
 
@@ -1749,7 +1803,7 @@ impl GraphStore {
         self.db.transaction(|tx| {
             tx.execute_batch(
                 "DELETE FROM nodes; DELETE FROM node_keys; DELETE FROM node_claims; DELETE FROM aliases;
-                 DELETE FROM edges; DELETE FROM edge_claims; DELETE FROM chunks;
+                 DELETE FROM edges; DELETE FROM edge_claims; DELETE FROM refs; DELETE FROM chunks;
                  INSERT INTO chunks_fts(chunks_fts) VALUES ('delete-all');
                  INSERT INTO nodes_fts(nodes_fts) VALUES ('delete-all');
                  UPDATE units SET hash = zeroblob(32) WHERE deleted = 0;",

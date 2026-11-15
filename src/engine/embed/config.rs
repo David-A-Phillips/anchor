@@ -27,6 +27,9 @@ pub struct EmbeddingConfig {
     pub dimensions: usize,
     /// Number of texts embedded per batch.
     pub batch_size: usize,
+    /// Also embed code chunks (signatures and body previews). Off by default: documentation,
+    /// doc comments, comments and descriptions are embedded; code is found by name and full text.
+    pub embed_code: bool,
 }
 
 impl Default for EmbeddingConfig {
@@ -36,6 +39,7 @@ impl Default for EmbeddingConfig {
             model: String::new(),
             dimensions: 384,
             batch_size: 32,
+            embed_code: false,
         }
     }
 }

@@ -313,10 +313,13 @@ impl Engine {
             return Ok(0);
         }
         let store = self.store.clone();
+        let embed_code = self.config.embeddings.embed_code;
         let chunks = tokio::task::spawn_blocking(move || -> Result<Vec<_>> {
             let mut out = Vec::with_capacity(ids.len());
             for id in ids {
-                if let Some(chunk) = store.chunk(id)? {
+                if let Some(chunk) = store.chunk(id)?
+                    && (embed_code || chunk.kind != crate::base::ChunkKind::Code)
+                {
                     out.push((chunk.id, chunk.hash, chunk.text));
                 }
             }
@@ -603,7 +606,16 @@ impl Engine {
         let name = lower.rsplit('/').next().unwrap_or(&lower);
         let mut unit = if let Some(language) = Language::from_path(rel) {
             let outcome = self.parser.parse(&format!("{id}:{rel}"), language, text)?;
-            build_file_unit(id, rel, text, &outcome.parsed)
+            let mut unit = build_file_unit(id, rel, text, &outcome.parsed);
+            if !self.config.parser.call_graph {
+                unit.edges.retain(|edge| {
+                    !matches!(
+                        edge.kind,
+                        EdgeKind::Calls | EdgeKind::References | EdgeKind::Imports
+                    )
+                });
+            }
+            unit
         } else if docs::doc_language(rel).is_some() {
             docs::parse_doc_file(id, rel, text)
         } else if (name.contains("openapi") || name.contains("swagger"))
@@ -749,6 +761,12 @@ impl Engine {
             }
         }
         self.apply_batch(&mut batch, report)?;
+        if !self.config.parser.keep_unresolved_references {
+            self.store.prune_pending(
+                id,
+                &[EdgeKind::Calls, EdgeKind::References, EdgeKind::Imports],
+            )?;
+        }
         Ok(true)
     }
 
