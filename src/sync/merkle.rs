@@ -445,7 +445,10 @@ impl MerkleTree {
                 Kind::Inner(children) => node = &children[usize::from(*n)],
                 Kind::Leaf(entries) => {
                     return Located::Virtual(
-                        entries.iter().filter(|e| path.covers(&e.key_hash)).collect(),
+                        entries
+                            .iter()
+                            .filter(|e| path.covers(&e.key_hash))
+                            .collect(),
                     );
                 }
             }
@@ -613,14 +616,24 @@ impl<'a> DiffSession<'a> {
     /// next one is taken.
     pub fn next_request(&mut self) -> Option<Vec<NodePath>> {
         if !self.in_flight.is_empty() {
-            return Some(self.in_flight.iter().map(|(path, _)| path.clone()).collect());
+            return Some(
+                self.in_flight
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect(),
+            );
         }
         if self.pending.is_empty() {
             return None;
         }
         let take = self.pending.len().min(MAX_NODES_PER_REQUEST);
         self.in_flight = self.pending.drain(..take).collect();
-        Some(self.in_flight.iter().map(|(path, _)| path.clone()).collect())
+        Some(
+            self.in_flight
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect(),
+        )
     }
 
     /// Feeds the remote nodes answering the last request, in request order.
@@ -1017,7 +1030,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn async_diff_matches_sync_diff() {
         let local = MerkleTree::from_metas((0..3_000).map(|i| meta(i, 1)));
-        let remote = MerkleTree::from_metas((5..3_005).map(|i| meta(i, 1 + u64::from(i % 1000 == 0))));
+        let remote =
+            MerkleTree::from_metas((5..3_005).map(|i| meta(i, 1 + u64::from(i % 1000 == 0))));
         let expected = diff(&local, &ns(), &mut &remote).expect("diff");
         let mut source = Counting::new(&remote);
         let found = diff_async(&local, &ns(), &mut source).await.expect("diff");

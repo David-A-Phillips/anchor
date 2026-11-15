@@ -2,6 +2,10 @@
 //! rule, and the client/server protocol over WebSockets and gRPC.
 
 mod config;
+pub mod identity;
+pub mod merkle;
+pub mod pack;
+pub mod store;
 
 use crate::base::Migration;
 

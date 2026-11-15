@@ -83,7 +83,9 @@ impl Add for PathCost {
 
     fn add(self, rhs: PathCost) -> PathCost {
         PathCost {
-            reference_elements: self.reference_elements.saturating_add(rhs.reference_elements),
+            reference_elements: self
+                .reference_elements
+                .saturating_add(rhs.reference_elements),
             weighted: self.weighted + rhs.weighted,
         }
     }

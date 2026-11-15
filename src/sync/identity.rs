@@ -309,12 +309,7 @@ impl TrustPolicy {
 
     /// Checks that `key` is an acceptable signer and that `signature` is its signature of `bytes`.
     /// Fails with [`Error::Integrity`] in both cases; the message tells them apart.
-    pub fn verify(
-        &self,
-        key: &PublicKey,
-        bytes: &[u8],
-        signature: &DeviceSignature,
-    ) -> Result<()> {
+    pub fn verify(&self, key: &PublicKey, bytes: &[u8], signature: &DeviceSignature) -> Result<()> {
         if !self.trusts(key) {
             return Err(Error::integrity(format!(
                 "signer {} (device {}) is not a trusted device",
@@ -515,7 +510,9 @@ mod tests {
             .verify(&bob.public_key(), b"x", &signature)
             .expect("any valid signature");
         trusted.add(bob.public_key(), "bob").expect("add");
-        trusted.add(bob.public_key(), "bob's laptop").expect("relabel");
+        trusted
+            .add(bob.public_key(), "bob's laptop")
+            .expect("relabel");
 
         let mut reopened = TrustedDevices::open(dir.path()).expect("reopen");
         assert_eq!(reopened.list().len(), 2);

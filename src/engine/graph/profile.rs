@@ -229,9 +229,7 @@ impl TraversalProfile {
         ]
         .into_iter()
         .fold(Self::new(), |profile, kind| {
-            profile
-                .allow(kind, Forward, 1.0)
-                .allow(kind, Reverse, 1.5)
+            profile.allow(kind, Forward, 1.0).allow(kind, Reverse, 1.5)
         })
         .allow_both(EdgeKind::Implements, 1.0)
     }

@@ -533,8 +533,7 @@ impl<'a> PackWriter<'a> {
             return Err(Error::other("pack spool file changed size while copying"));
         }
         out.flush()?;
-        let bytes =
-            (HEADER_LEN + manifest_bytes.len() + DeviceSignature::LEN) as u64 + copied;
+        let bytes = (HEADER_LEN + manifest_bytes.len() + DeviceSignature::LEN) as u64 + copied;
         Ok(PackSummary {
             pack_id: manifest.pack_id.clone(),
             bytes,
@@ -667,7 +666,8 @@ impl<R: Read> PackReader<R> {
 
     fn advance(&mut self) -> Result<Option<PackEntry>> {
         if matches!(self.state, ReaderState::Fresh(_)) {
-            let ReaderState::Fresh(reader) = std::mem::replace(&mut self.state, ReaderState::Failed)
+            let ReaderState::Fresh(reader) =
+                std::mem::replace(&mut self.state, ReaderState::Failed)
             else {
                 unreachable!("state was just matched as Fresh");
             };
@@ -902,7 +902,13 @@ pub(crate) mod tests {
         unit
     }
 
-    pub(crate) fn live(source: &str, name: &str, content: &str, hlc: u64, origin: &str) -> PackEntry {
+    pub(crate) fn live(
+        source: &str,
+        name: &str,
+        content: &str,
+        hlc: u64,
+        origin: &str,
+    ) -> PackEntry {
         PackEntry::live(
             unit(source, name, content),
             UnitVersion::new(Hlc::new(hlc, 0), origin),
@@ -1162,7 +1168,10 @@ pub(crate) mod tests {
             .sum();
         lying.payload.raw_size = first_three;
         let err = read_pack(&resign(&lying), &TrustPolicy::AnyValid).expect_err("bomb");
-        assert!(err.to_string().contains("larger than the manifest"), "{err}");
+        assert!(
+            err.to_string().contains("larger than the manifest"),
+            "{err}"
+        );
         // Declares a count the payload does not deliver.
         let mut lying = manifest;
         lying.entries = 5;
@@ -1193,7 +1202,13 @@ pub(crate) mod tests {
         for index in 0..COUNT {
             let content = format!("{index} {filler}");
             writer
-                .write(&live("alpha", &format!("f{index}"), &content, index + 1, "d1"))
+                .write(&live(
+                    "alpha",
+                    &format!("f{index}"),
+                    &content,
+                    index + 1,
+                    "d1",
+                ))
                 .expect("write");
         }
         let summary = writer

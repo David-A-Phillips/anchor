@@ -137,15 +137,15 @@ impl UnitStore for MemoryUnitStore {
         }
         let mut report = ApplyReport::default();
         for mut entry in entries {
-            let reject = |reason: String| Rejection {
-                key: entry.meta.key.clone(),
+            let rejected_key = entry.meta.key.clone();
+            let reject = move |reason: String| Rejection {
+                key: rejected_key.clone(),
                 reason,
             };
             if !inner.sources.contains_key(&entry.meta.source) {
-                report.rejected.push(reject(format!(
-                    "unknown source `{}`",
-                    entry.meta.source
-                )));
+                report
+                    .rejected
+                    .push(reject(format!("unknown source `{}`", entry.meta.source)));
                 continue;
             }
             if let Err(err) = entry.validate() {
