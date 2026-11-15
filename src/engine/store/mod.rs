@@ -16,8 +16,10 @@
 //! # Linker
 //!
 //! Edge claims whose endpoints do not resolve stay pending and are re-evaluated whenever a node
-//! or alias with a matching name appears or disappears (at most [`RELINK_LIMIT`] claims per name
-//! and operation, which bounds the work a very common name can cause).
+//! or alias with a matching name appears or disappears (at most [`RELINK_LIMIT`] pending claims per
+//! name and operation, which bounds the work a very common name can cause). Limitation: an edge
+//! that resolved uniquely is not re-examined when a later node makes its lookup ambiguous;
+//! [`GraphStore::rebuild`] re-evaluates everything.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -33,7 +35,7 @@ use crate::base::{
 };
 
 /// Maximum number of edge claims re-evaluated per changed name in one operation.
-pub const RELINK_LIMIT: usize = 5_000;
+pub const RELINK_LIMIT: usize = 500;
 
 /// Schema history of the graph store tables.
 pub const MIGRATIONS: &[Migration] = &[Migration {
@@ -697,8 +699,8 @@ fn relink(tx: &Connection, touched: &mut Touched) -> Result<()> {
     for name in &names {
         // Lookups store the text as written; match its normalised forms too.
         let mut statement = tx.prepare_cached(
-            "SELECT id FROM edge_claims WHERE from_text = ?1 OR to_text = ?1
-             OR from_text = ?2 OR to_text = ?2 LIMIT ?3",
+            "SELECT id FROM edge_claims WHERE edge_id IS NULL
+             AND (from_text = ?1 OR to_text = ?1 OR from_text = ?2 OR to_text = ?2) LIMIT ?3",
         )?;
         let slug = keys::slugify(name);
         for id in statement.query_map(params![name, slug, RELINK_LIMIT as i64], |row| {
@@ -862,7 +864,6 @@ fn write_unit(
     for claim in new_claims {
         link_claim(tx, touched, claim)?;
     }
-    relink(tx, touched)?;
 
     // Chunks: keep the ids of unchanged chunks.
     let mut old: HashMap<(String, u32, String), OldChunk> = HashMap::new();
@@ -1164,6 +1165,9 @@ impl GraphStore {
                 let hash = unit.content_hash()?;
                 changed |= write_unit(tx, touched, &unit, hash, version)?;
             }
+            // One linking pass for the whole batch: names touched by any unit are re-examined
+            // once, however many units mention them.
+            relink(tx, touched)?;
             Ok(changed)
         })
     }
@@ -1198,7 +1202,9 @@ impl GraphStore {
                             meta.key
                         )));
                     }
-                    if !write_unit(tx, touched, &unit, hash, &version)? {
+                    let written = write_unit(tx, touched, &unit, hash, &version)?;
+                    relink(tx, touched)?;
+                    if !written {
                         tx.prepare_cached("UPDATE units SET hlc = ?2, origin = ?3 WHERE key = ?1")?
                             .execute(params![
                                 meta.key.as_str(),
@@ -1717,6 +1723,7 @@ impl GraphStore {
                 let hash = unit.content_hash()?;
                 write_unit(tx, &mut touched, unit, hash, version)?;
             }
+            relink(tx, &mut touched)?;
             Ok(())
         })
     }
