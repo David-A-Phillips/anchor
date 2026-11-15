@@ -898,7 +898,7 @@ pub(crate) mod tests {
         println!("100k x 384 search: {elapsed:?}");
         // Target is 30 ms in release builds; the bound is generous because the test profile
         // compiles this crate at opt-level 1 (no auto-vectorisation) and CI machines are shared.
-        assert!(elapsed.as_millis() < 600, "search took {elapsed:?}");
+        assert!(elapsed.as_millis() < 300, "search took {elapsed:?}");
     }
 
     /// `cargo test --release -- --ignored million` measures the headline target (about 400 MB).
@@ -911,6 +911,6 @@ pub(crate) mod tests {
             "1M x 384 search: {elapsed:?}, memory {} MB",
             index.memory_bytes() >> 20
         );
-        assert!(elapsed.as_millis() < 1500, "search took {elapsed:?}");
+        assert!(elapsed.as_millis() < 600, "search took {elapsed:?}");
     }
 }
