@@ -333,6 +333,86 @@ fn remote_versions_follow_the_supersedes_rule() {
     );
 }
 
+fn ledger_file() -> Unit {
+    let mut file = unit("repo", "src/lib.rs", UnitKind::File);
+    let path = file.add_node(NodeAssertion::new(
+        NodeKind::File,
+        keys::file(&SourceId::new("repo"), "src/lib.rs"),
+        "src/lib.rs",
+    ));
+    for (name, kind) in [("Ledger", "struct"), ("charge", "function")] {
+        let mut node = NodeAssertion::new(
+            NodeKind::Symbol,
+            crate::base::NodeKey::new(format!("sym:repo:src/lib.rs#{name}")),
+            name,
+        );
+        node.attrs.insert(attrs::SYMBOL_KIND.into(), kind.into());
+        node.attrs.insert(attrs::VISIBILITY.into(), "public".into());
+        let symbol = file.add_node(node);
+        file.add_edge(EdgeAssertion::new(&path, EdgeKind::Contains, &symbol));
+    }
+    file
+}
+
+#[test]
+fn apply_remote_view_stores_whole_units_but_materialises_the_view() {
+    use crate::config::Depth;
+    use crate::engine::depth::view;
+    let mut file = ledger_file();
+    file.canonicalize();
+    let meta = UnitMeta {
+        key: file.key.clone(),
+        source: file.source.clone(),
+        kind: file.kind,
+        hash: file.content_hash().expect("hash"),
+        hlc: Hlc::new(5, 0),
+        origin: DeviceId::new("remote"),
+        deleted: false,
+    };
+
+    let plain = store();
+    plain.apply_remote(&meta, Some(&file)).expect("plain");
+
+    let thin = store();
+    thin.apply_remote_view(&meta, Some(&file), &view(Depth::Map))
+        .expect("view");
+    assert_eq!(thin.unit(&file.key).expect("unit"), Some(file.clone()));
+    let stored = thin.unit_meta(&file.key).expect("meta").expect("meta");
+    assert_eq!(stored.hash, meta.hash);
+    let keys: Vec<String> = thin.snapshot().expect("snap").0.into_keys().collect();
+    assert!(keys.iter().any(|k| k.ends_with("#Ledger")), "{keys:?}");
+    assert!(!keys.iter().any(|k| k.ends_with("#charge")), "{keys:?}");
+
+    // Nothing materialised at all, yet the unit is stored.
+    let none = store();
+    none.apply_remote_view(&meta, Some(&file), &|_| None)
+        .expect("none");
+    assert!(none.snapshot().expect("snap").0.is_empty());
+    assert!(none.unit(&file.key).expect("unit").is_some());
+
+    // Rematerialising to full yields exactly what a plain apply gives.
+    let repo = SourceId::new("repo");
+    let outcome = thin
+        .rematerialize_source(&repo, &view(Depth::Full))
+        .expect("rematerialize");
+    assert!(outcome.changed);
+    assert_eq!(
+        thin.snapshot().expect("snap"),
+        plain.snapshot().expect("snap")
+    );
+    none.rematerialize_source(&repo, &view(Depth::Full))
+        .expect("rematerialize");
+    assert_eq!(
+        none.snapshot().expect("snap"),
+        plain.snapshot().expect("snap")
+    );
+    // And back down again.
+    thin.rematerialize_source(&repo, &view(Depth::Map))
+        .expect("down");
+    let keys: Vec<String> = thin.snapshot().expect("snap").0.into_keys().collect();
+    assert!(!keys.iter().any(|k| k.ends_with("#charge")), "{keys:?}");
+}
+
 #[test]
 fn text_search_and_chunk_ids_are_stable() {
     let store = store();

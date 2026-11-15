@@ -13,6 +13,7 @@
 //! * [`query`] — the query engine tying everything together.
 
 pub mod core;
+pub mod depth;
 pub mod embed;
 pub mod graph;
 pub mod ingest;
@@ -23,4 +24,4 @@ pub mod router;
 pub mod store;
 pub mod watcher;
 
-pub use core::{Engine, EngineEvent, LatencyStats, ScanReport};
+pub use core::{Engine, EngineEvent, LatencyStats, RemoteTiles, ScanReport};

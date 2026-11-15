@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use crate::base::{Error, Result, SourceDescriptor, SourceId, Unit, UnitKey, UnitMeta};
+use crate::config::Depth;
+use crate::engine::depth::view;
 use crate::engine::store::{ApplyOutcome, GraphStore};
 
 use super::pack::PackEntry;
@@ -17,12 +19,27 @@ pub type OnApplied = Arc<dyn Fn(&ApplyOutcome) + Send + Sync>;
 pub struct GraphUnitStore {
     store: GraphStore,
     on_applied: OnApplied,
+    depth_of: DepthOf,
 }
+
+/// Depth a source is held at on this device.
+pub type DepthOf = Arc<dyn Fn(&SourceId) -> Depth + Send + Sync>;
 
 impl GraphUnitStore {
     /// Wraps `store`; `on_applied` runs after each applied unit.
     pub fn new(store: GraphStore, on_applied: OnApplied) -> Self {
-        Self { store, on_applied }
+        Self {
+            store,
+            on_applied,
+            depth_of: Arc::new(|_| Depth::Full),
+        }
+    }
+
+    /// Materialises applied units only as deep as `depth_of` allows for their source; units
+    /// are still stored whole.
+    pub fn with_depths(mut self, depth_of: DepthOf) -> Self {
+        self.depth_of = depth_of;
+        self
     }
 }
 
@@ -87,7 +104,12 @@ impl UnitStore for GraphUnitStore {
                 report.stale += 1;
                 continue;
             }
-            match self.store.apply_remote(&entry.meta, entry.unit.as_ref()) {
+            let depth = (self.depth_of)(&entry.meta.source);
+            let view = view(depth);
+            match self
+                .store
+                .apply_remote_view(&entry.meta, entry.unit.as_ref(), &view)
+            {
                 Ok(outcome) => {
                     (self.on_applied)(&outcome);
                     report.applied.push(entry.meta);

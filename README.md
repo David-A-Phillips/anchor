@@ -241,9 +241,32 @@ When a question touches a source below full depth, the answer always lists it un
   gives the fuller answer.
 - `manual`: answer now and wait for `anchor deepen <source> [--depth map|full]`.
 
-Deepening works from the local copy of the source and needs no server. It is remembered across
-restarts and never goes shallower. Pulling deeper tiles from a sync server for sources that are
-not on the local disk is not implemented yet.
+Deepening a source that is on this machine works from the local copy and needs no server. It is
+remembered across restarts and never goes shallower.
+
+### Depth with a sync server
+
+A client does not need a local copy of a source to hold it. Depth is a view, not different
+content: units travel and are stored whole on every device (so hashes, Merkle roots and merging
+are unaffected), and a client materialises into its graph only what its depth for that source
+allows. At `phone_book` depth it does not even request the units that depth would not show
+(files, tickets, wiki pages, reviews), so a whole organisation costs a few units per repository.
+
+```toml
+mode = "client"
+
+[sync]
+server_url = "ws://anchor.example.com:7891/sync"
+default_depth = "phone_book"   # depth of subscribed sources not configured locally (default: full)
+```
+
+A source is *remote* when it is not in the local configuration or its `location` does not exist
+on this machine. `anchor sync` brings remote sources in at `default_depth`. When a question
+touches one (or you run `anchor deepen <source> --depth map|full`), the client pulls the missing
+units from the server, re-materialises the source at the new depth and remembers it. With
+`on_shallow = "block"` this happens before the answer, which is then marked `deepened`. Deepening
+a remote source with no sync server configured is an error ("source X is not on this machine and
+no sync server is configured"). Sources that are local keep using the local copy.
 
 ## Database size
 

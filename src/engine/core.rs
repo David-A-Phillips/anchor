@@ -106,6 +106,14 @@ pub struct LatencyStats {
 const LATENCY_WINDOW: usize = 1024;
 const BATCH: usize = 256;
 
+/// Pulls the deeper tiles of a source from a sync server (blocking). Implemented by the sync
+/// client; the engine calls it when a source that is not on this machine is deepened.
+pub trait RemoteTiles: Send + Sync {
+    /// Fetches the units of `source` that `depth` materialises into the local store, which
+    /// applies them through the depth view.
+    fn pull(&self, source: &SourceId, depth: Depth) -> Result<()>;
+}
+
 /// The assembled engine. Create with [`Engine::open`]; share as `Arc<Engine>`.
 pub struct Engine {
     config: AnchorConfig,
@@ -127,6 +135,7 @@ pub struct Engine {
     ownership: Mutex<HashMap<SourceId, Arc<OwnershipRules>>>,
     manifest: Mutex<HashMap<(SourceId, String), (u64, i128)>>,
     depths: Mutex<HashMap<SourceId, Depth>>,
+    remote: Mutex<Option<Arc<dyn RemoteTiles>>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -223,6 +232,7 @@ impl Engine {
             ownership: Mutex::new(HashMap::new()),
             manifest: Mutex::new(HashMap::new()),
             depths: Mutex::new(HashMap::new()),
+            remote: Mutex::new(None),
         }))
     }
 
@@ -271,47 +281,135 @@ impl Engine {
         self.events.subscribe()
     }
 
-    /// The depth a source is ingested at: the deeper of its configured depth and the depth it
-    /// has been deepened to at runtime. Unknown sources are reported as fully ingested.
+    /// Installs the client that pulls deeper tiles of sources this machine does not hold.
+    pub fn set_remote(&self, remote: Arc<dyn RemoteTiles>) {
+        *self.remote.lock() = Some(remote);
+    }
+
+    /// Whether a source is not on this machine: not configured locally, or configured with a
+    /// location that does not exist on disk. Such sources are only reachable through sync.
+    pub fn is_remote(&self, id: &SourceId) -> bool {
+        self.config
+            .source(id)
+            .is_none_or(|source| !Path::new(&source.location).exists())
+    }
+
+    /// The depth a source is held at: for local sources the deeper of its configured depth and
+    /// the depth it has been deepened to at runtime. A source that is not configured locally is
+    /// held at its recorded depth (full when none is recorded).
     pub fn depth(&self, id: &SourceId) -> Depth {
         if let Some(depth) = self.depths.lock().get(id) {
             return *depth;
         }
-        let configured = self
-            .config
-            .source(id)
-            .map_or(Depth::Full, |source| source.depth);
+        let configured = self.config.source(id).map(|source| source.depth);
         let stored = self
             .store
             .source_depth(id)
             .ok()
             .flatten()
-            .map_or(Depth::PhoneBook, Depth::from_code);
-        let depth = configured.max(stored);
+            .map(Depth::from_code);
+        let depth = match (configured, stored) {
+            (Some(c), Some(s)) => c.max(s),
+            (Some(d), None) | (None, Some(d)) => d,
+            // Not cached: a depth may still be recorded for it (see `depth_or_record`).
+            (None, None) => return Depth::Full,
+        };
         self.depths.lock().insert(id.clone(), depth);
         depth
     }
 
-    /// Sources ingested below full depth, with their current depth.
+    /// Like [`Self::depth`], but a source that is neither configured nor has a recorded depth
+    /// is recorded at `default` (the depth a sync client holds subscribed sources at).
+    pub fn depth_or_record(&self, id: &SourceId, default: Depth) -> Depth {
+        if self.config.source(id).is_none()
+            && !self.depths.lock().contains_key(id)
+            && matches!(self.store.source_depth(id), Ok(None))
+            && self.store.set_source_depth(id, default.code()).is_ok()
+        {
+            self.depths.lock().insert(id.clone(), default);
+            return default;
+        }
+        self.depth(id)
+    }
+
+    /// Sources held below full depth, with their current depth: configured sources and sources
+    /// pulled from a server.
     pub fn shallow_sources(&self) -> Vec<(SourceId, Depth)> {
-        self.config
+        let mut out: Vec<(SourceId, Depth)> = self
+            .config
             .sources
             .iter()
             .filter(|source| source.enabled)
             .map(|source| (source.id.clone(), self.depth(&source.id)))
             .filter(|(_, depth)| *depth < Depth::Full)
-            .collect()
+            .collect();
+        if let Ok(sources) = self.store.sources() {
+            for source in sources {
+                if self.config.source(&source.id).is_none() {
+                    let depth = self.depth(&source.id);
+                    if depth < Depth::Full {
+                        out.push((source.id, depth));
+                    }
+                }
+            }
+        }
+        out
     }
 
-    /// Ingests a source more deeply (never more shallowly) and re-scans it. Works entirely from
-    /// the local copy of the source.
+    /// Ingests a source more deeply (never more shallowly). A local source is re-scanned from
+    /// its copy on disk; a remote one pulls the units that depth needs from the sync server and
+    /// re-materialises its stored units.
     pub fn deepen(&self, id: &SourceId, depth: Depth) -> Result<ScanReport> {
+        if self.is_remote(id) {
+            return self.deepen_remote(id, depth);
+        }
         self.source(id)?;
         let target = self.depth(id).max(depth);
         self.store.set_source_depth(id, target.code())?;
         self.depths.lock().insert(id.clone(), target);
         self.manifest.lock().retain(|(source, _), _| source != id);
         self.scan_source(id)
+    }
+
+    fn deepen_remote(&self, id: &SourceId, depth: Depth) -> Result<ScanReport> {
+        let started = Instant::now();
+        let remote = self.remote.lock().clone().ok_or_else(|| {
+            Error::config(format!(
+                "source {id} is not on this machine and no sync server is configured"
+            ))
+        })?;
+        let previous = self.depth(id);
+        let target = previous.max(depth);
+        self.store.set_source_depth(id, target.code())?;
+        self.depths.lock().insert(id.clone(), target);
+        let result = remote.pull(id, target).and_then(|()| {
+            let outcome = self
+                .store
+                .rematerialize_source(id, &super::depth::view(target))?;
+            self.absorb(&outcome)
+        });
+        if let Err(err) = result {
+            // Do not claim a depth that was not reached.
+            let _ = self.store.set_source_depth(id, previous.code());
+            self.depths.lock().insert(id.clone(), previous);
+            return Err(err);
+        }
+        let report = ScanReport {
+            source: id.to_string(),
+            depth: target.to_string(),
+            units_applied: self
+                .store
+                .unit_metas(id)?
+                .iter()
+                .filter(|m| !m.deleted)
+                .count(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            ..ScanReport::default()
+        };
+        self.publish(EngineEvent::ScanFinished {
+            report: report.clone(),
+        });
+        Ok(report)
     }
 
     fn version(&self) -> UnitVersion {
@@ -720,49 +818,7 @@ impl Engine {
         } else {
             return Ok(None);
         };
-        if self.depth(id) < Depth::Full {
-            // Map depth: what exists and where, not how it is wired or implemented.
-            unit.edges.retain(|edge| {
-                !matches!(
-                    edge.kind,
-                    EdgeKind::Calls | EdgeKind::References | EdgeKind::Imports
-                )
-            });
-            unit.chunks
-                .retain(|chunk| chunk.kind != crate::base::ChunkKind::Code);
-            // Keep the outline someone outside the file would look for: public types. Functions,
-            // methods and private items appear when the source is deepened.
-            let dropped: std::collections::HashSet<_> = unit
-                .nodes
-                .iter()
-                .filter(|node| {
-                    let attr = |name: &str| node.attrs.get(name).and_then(|v| v.as_str());
-                    let outline = matches!(
-                        attr(attrs::SYMBOL_KIND),
-                        Some(
-                            "struct"
-                                | "enum"
-                                | "trait"
-                                | "interface"
-                                | "class"
-                                | "module"
-                                | "type_alias"
-                                | "union"
-                        )
-                    );
-                    node.kind == NodeKind::Symbol
-                        && !(outline && attr(attrs::VISIBILITY) == Some("public"))
-                })
-                .map(|node| node.key.clone())
-                .collect();
-            if !dropped.is_empty() {
-                let gone = |reference: &crate::base::NodeRef| matches!(reference, crate::base::NodeRef::Key(key) if dropped.contains(key));
-                unit.nodes.retain(|node| !dropped.contains(&node.key));
-                unit.edges
-                    .retain(|edge| !gone(&edge.from) && !gone(&edge.to));
-                unit.chunks.retain(|chunk| !dropped.contains(&chunk.node));
-            }
-        }
+        super::depth::thin_unit(&mut unit, self.depth(id));
         if let Some(rules) = rules {
             let file_key = keys::file(id, rel);
             if unit.nodes.iter().any(|node| node.key == file_key) {

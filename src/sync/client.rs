@@ -1,6 +1,6 @@
 //! The sync client: one-shot [`SyncClient::sync_once`] and the long-running [`SyncClient::run`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::base::{ContentHash, Error, Result, SourceId, UnitKey, UnitMeta};
+use crate::config::Depth;
+use crate::engine::depth::unit_in_depth;
 
 use super::config::{SyncConfig, SyncTransport};
 use super::identity::{DeviceIdentity, TrustPolicy};
@@ -75,6 +77,11 @@ pub struct ClientOptions {
     pub publish: Vec<SourceId>,
     /// Sources to pull (empty: everything).
     pub subscribe: Vec<SourceId>,
+    /// Depth each subscribed source is pulled at (absent: full). Below full, only the units
+    /// that depth materialises are requested.
+    pub depths: HashMap<SourceId, Depth>,
+    /// Depth of subscribed sources missing from `depths`.
+    pub default_depth: Depth,
     /// Seconds between rounds without a notification.
     pub interval: Duration,
     /// Connection establishment timeout.
@@ -106,6 +113,8 @@ impl ClientOptions {
             limits: PackLimits::default(),
             publish: config.publish.clone(),
             subscribe: config.subscribe.clone(),
+            depths: HashMap::new(),
+            default_depth: Depth::Full,
             interval: Duration::from_secs(config.interval_secs.max(1)),
             connect_timeout: Duration::from_secs(10),
             io_timeout: Duration::from_secs(30),
@@ -226,7 +235,26 @@ impl SyncClient {
                 .collect::<Vec<UnitKey>>()
         };
         let to_push = collect(&push_ns, &local_metas, &remote_metas);
-        let to_pull = collect(&pull_ns, &remote_metas, &local_metas);
+        // Below full depth, units the depth does not materialise are not requested; they are
+        // pulled when the depth for the source rises.
+        let in_depth: BTreeMap<SourceId, Vec<UnitMeta>> = remote_metas
+            .iter()
+            .map(|(ns, metas)| {
+                let depth = self
+                    .opts
+                    .depths
+                    .get(ns)
+                    .copied()
+                    .unwrap_or(self.opts.default_depth);
+                let kept = metas
+                    .iter()
+                    .filter(|meta| unit_in_depth(meta.kind, depth))
+                    .cloned()
+                    .collect();
+                (ns.clone(), kept)
+            })
+            .collect();
+        let to_pull = collect(&pull_ns, &in_depth, &local_metas);
 
         for keys in to_push.chunks(BATCH_UNITS) {
             let (keys, base) = (keys.to_vec(), server.roots.clone());

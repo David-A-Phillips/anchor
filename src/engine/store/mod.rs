@@ -813,6 +813,24 @@ fn write_unit(
     hash: ContentHash,
     version: &UnitVersion,
 ) -> Result<bool> {
+    write_unit_view(tx, touched, unit, Some(unit), hash, version, false)
+}
+
+/// Stores `unit` whole (row and body) but materialises only `view` (`None`: nothing). `force`
+/// re-materialises even when the stored hash is unchanged.
+fn write_unit_view(
+    tx: &Connection,
+    touched: &mut Touched,
+    unit: &Unit,
+    view: Option<&Unit>,
+    hash: ContentHash,
+    version: &UnitVersion,
+    force: bool,
+) -> Result<bool> {
+    let (v_nodes, v_edges, v_chunks) = match view {
+        Some(v) => (&v.nodes[..], &v.edges[..], &v.chunks[..]),
+        None => (&[][..], &[][..], &[][..]),
+    };
     source_trust(tx, &unit.source)?;
     let existing: Option<(i64, Vec<u8>, i64)> = tx
         .prepare_cached("SELECT id, hash, deleted FROM units WHERE key = ?1")?
@@ -822,6 +840,7 @@ fn write_unit(
         .optional()?;
     if let Some((_, old_hash, deleted)) = &existing
         && *deleted == 0
+        && !force
         && old_hash.as_slice() == hash.as_bytes()
     {
         return Ok(false);
@@ -863,7 +882,7 @@ fn write_unit(
     let mut affected = remove_unit_rows(tx, touched, unit_id)?;
 
     // Node claims.
-    for node in &unit.nodes {
+    for node in v_nodes {
         let node_id = match node_by_key(tx, node.key.as_str())? {
             Some(id) => id,
             None => {
@@ -914,8 +933,8 @@ fn write_unit(
     }
 
     // Edge claims.
-    let mut new_claims = Vec::with_capacity(unit.edges.len());
-    for edge in &unit.edges {
+    let mut new_claims = Vec::with_capacity(v_edges.len());
+    for edge in v_edges {
         insert_edge_claim(tx, unit_id, edge)?;
         new_claims.push(tx.last_insert_rowid());
     }
@@ -943,7 +962,7 @@ fn write_unit(
             old.insert((node_key, ordinal, kind), OldChunk { id, text });
         }
     }
-    for chunk in &unit.chunks {
+    for chunk in v_chunks {
         let Some(node_id) = node_by_key(tx, chunk.node.as_str())? else {
             continue;
         };
@@ -1262,6 +1281,17 @@ impl GraphStore {
 
     /// Applies a unit version received from another device, if it supersedes the local one.
     pub fn apply_remote(&self, meta: &UnitMeta, unit: Option<&Unit>) -> Result<ApplyOutcome> {
+        self.apply_remote_view(meta, unit, &|unit| Some(unit.clone()))
+    }
+
+    /// Like [`Self::apply_remote`], but materialises only `view(unit)` (`None`: nothing). The
+    /// unit is verified, stored and hashed whole, so versions and Merkle roots are unaffected.
+    pub fn apply_remote_view(
+        &self,
+        meta: &UnitMeta,
+        unit: Option<&Unit>,
+        view: &dyn Fn(&Unit) -> Option<Unit>,
+    ) -> Result<ApplyOutcome> {
         self.write(|tx, touched| {
             if let Some(current) = read_meta(tx, &meta.key)?
                 && !meta.supersedes(&current)
@@ -1285,7 +1315,16 @@ impl GraphStore {
                             meta.key
                         )));
                     }
-                    let written = write_unit(tx, touched, &unit, hash, &version)?;
+                    let viewed = view(&unit);
+                    let written = write_unit_view(
+                        tx,
+                        touched,
+                        &unit,
+                        viewed.as_ref(),
+                        hash,
+                        &version,
+                        false,
+                    )?;
                     relink(tx, touched)?;
                     if !written {
                         tx.prepare_cached("UPDATE units SET hlc = ?2, origin = ?3 WHERE key = ?1")?
@@ -1302,6 +1341,43 @@ impl GraphStore {
                     meta.key
                 ))),
             }
+        })
+    }
+
+    /// Re-materialises every live unit of `source` from its stored body through `view` (used
+    /// when the depth of a source changes). Returns what changed in the graph and chunks.
+    pub fn rematerialize_source(
+        &self,
+        source: &SourceId,
+        view: &dyn Fn(&Unit) -> Option<Unit>,
+    ) -> Result<ApplyOutcome> {
+        let units: Vec<(Unit, UnitVersion)> = self.db.read(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT body, hlc, origin FROM units WHERE source = ?1 AND deleted = 0 ORDER BY key",
+            )?;
+            let rows = statement.query_map([source.as_str()], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (body, hlc, origin) = row?;
+                let unit: Unit = serde_json::from_slice(&zstd::decode_all(body.as_slice())?)?;
+                out.push((unit, UnitVersion::new(Hlc::from_i64(hlc), origin)));
+            }
+            Ok(out)
+        })?;
+        self.write(|tx, touched| {
+            for (unit, version) in &units {
+                let hash = unit.content_hash()?;
+                let viewed = view(unit);
+                write_unit_view(tx, touched, unit, viewed.as_ref(), hash, version, true)?;
+            }
+            relink(tx, touched)?;
+            Ok(!units.is_empty())
         })
     }
 

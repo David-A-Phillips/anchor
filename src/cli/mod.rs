@@ -21,7 +21,7 @@ use crate::engine::{Engine, EngineEvent};
 use crate::metrics::{TimeRange, format_usd};
 use crate::sync::identity::{DeviceIdentity, TrustPolicy, TrustedDevices};
 use crate::sync::{
-    ClientOptions, GraphUnitStore, ServerOptions, SyncClient, SyncServer, token_from_env,
+    ClientOptions, GraphUnitStore, ServerOptions, SyncClient, SyncServer, SyncTiles, token_from_env,
 };
 
 /// Anchor: a local-first context engine that grounds AI models in your code, docs and org.
@@ -227,17 +227,69 @@ async fn open_engine(config: AnchorConfig) -> Result<Arc<Engine>> {
     tokio::task::spawn_blocking(move || Engine::open(config)).await?
 }
 
-/// The engine's store as a sync store; applied units flow into the in-memory graph.
-fn graph_unit_store(engine: &Arc<Engine>) -> Arc<GraphUnitStore> {
+/// The engine's store as a sync store; applied units flow into the in-memory graph. As a
+/// client, units are materialised only as deep as this device holds each source.
+fn graph_unit_store(engine: &Arc<Engine>, client: bool) -> Arc<GraphUnitStore> {
     let sink = engine.clone();
-    Arc::new(GraphUnitStore::new(
+    let store = GraphUnitStore::new(
         engine.store().clone(),
         Arc::new(move |outcome| {
             if let Err(err) = sink.absorb(outcome) {
                 tracing::warn!("cannot absorb a synced unit: {err}");
             }
         }),
-    ))
+    );
+    if !client {
+        return Arc::new(store);
+    }
+    let depths = engine.clone();
+    let default = engine.config().sync.default_depth;
+    Arc::new(store.with_depths(Arc::new(move |source| {
+        depths.depth_or_record(source, default)
+    })))
+}
+
+/// Client options with the depth this device holds each known source at.
+fn client_options(engine: &Arc<Engine>, token: Option<String>) -> Result<ClientOptions> {
+    let keys_dir = engine.paths().keys_dir();
+    let identity = Arc::new(DeviceIdentity::load_or_create(&keys_dir)?);
+    let mut options = ClientOptions::from_config(
+        &engine.config().sync,
+        identity,
+        token,
+        trust_policy(&keys_dir)?,
+    )?;
+    options.default_depth = engine.config().sync.default_depth;
+    let mut known: Vec<SourceId> = engine
+        .config()
+        .sources
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    known.extend(engine.store().sources()?.into_iter().map(|s| s.id));
+    for id in known {
+        let depth = engine.depth(&id);
+        options.depths.insert(id, depth);
+    }
+    Ok(options)
+}
+
+/// In client mode, lets the engine pull deeper tiles of remote sources from the server.
+fn install_remote(engine: &Arc<Engine>) -> Result<()> {
+    let sync = &engine.config().sync;
+    if engine.config().mode != crate::config::Mode::Client || sync.server_url.is_none() {
+        return Ok(());
+    }
+    let token = token_from_env(sync.auth_token_env.as_deref(), |name| {
+        std::env::var(name).ok()
+    });
+    let options = client_options(engine, token)?;
+    engine.set_remote(Arc::new(SyncTiles::new(
+        graph_unit_store(engine, true),
+        options,
+        tokio::runtime::Handle::current(),
+    )));
+    Ok(())
 }
 
 /// Trusted device keys when any are configured; otherwise every valid signature is accepted
@@ -323,6 +375,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Ingest { source } => {
             let (config, _) = load_config(&cli.config)?;
             let engine = open_engine(config).await?;
+            install_remote(&engine)?;
             let scan = engine.clone();
             let reports = tokio::task::spawn_blocking(move || match source {
                 Some(id) => scan
@@ -356,6 +409,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         } => {
             let (config, _) = load_config(&cli.config)?;
             let engine = open_engine(config).await?;
+            install_remote(&engine)?;
             let mut request = QueryRequest::new(text);
             request.mode = if retrieval_only {
                 QueryMode::RetrievalOnly
@@ -582,7 +636,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 listener.local_addr()?,
                 options.identity.device_id()
             );
-            SyncServer::serve(listener, graph_unit_store(&engine), options, async {
+            SyncServer::serve(listener, graph_unit_store(&engine, false), options, async {
                 let _ = tokio::signal::ctrl_c().await;
             })
             .await?;
@@ -592,13 +646,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let token = token_from_env(config.sync.auth_token_env.as_deref(), |name| {
                 std::env::var(name).ok()
             });
-            let sync = config.sync.clone();
             let engine = open_engine(config).await?;
-            let keys_dir = engine.paths().keys_dir();
-            let identity = Arc::new(DeviceIdentity::load_or_create(&keys_dir)?);
-            let options =
-                ClientOptions::from_config(&sync, identity, token, trust_policy(&keys_dir)?)?;
-            let report = SyncClient::new(graph_unit_store(&engine), options)
+            let options = client_options(&engine, token)?;
+            let report = SyncClient::new(graph_unit_store(&engine, true), options)
                 .sync_once()
                 .await?;
             println!(
@@ -649,6 +699,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Deepen { source, depth } => {
             let (config, _) = load_config(&cli.config)?;
             let engine = open_engine(config).await?;
+            install_remote(&engine)?;
             let scan = engine.clone();
             let report =
                 tokio::task::spawn_blocking(move || scan.deepen(&SourceId::new(source), depth))

@@ -82,6 +82,8 @@ impl Server {
             limits: Default::default(),
             publish: ids(publish),
             subscribe: ids(subscribe),
+            depths: Default::default(),
+            default_depth: crate::config::Depth::Full,
             interval: Duration::from_secs(3600),
             connect_timeout: Duration::from_secs(5),
             io_timeout: Duration::from_secs(10),

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::base::SourceId;
+use crate::config::Depth;
 
 /// Wire protocol used between a client and the central server.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,6 +31,9 @@ pub struct SyncConfig {
     pub publish: Vec<SourceId>,
     /// Sources this device pulls from the server. Empty pulls everything the server offers.
     pub subscribe: Vec<SourceId>,
+    /// Depth at which subscribed sources without a local configuration are held (the rest of
+    /// the depth comes from `anchor deepen`). `full` keeps the whole unit set materialised.
+    pub default_depth: Depth,
     /// Seconds between sync rounds when no change notification arrives.
     pub interval_secs: u64,
     /// Address the sync server listens on (server mode).
@@ -44,6 +48,7 @@ impl Default for SyncConfig {
             auth_token_env: None,
             publish: Vec::new(),
             subscribe: Vec::new(),
+            default_depth: Depth::Full,
             interval_secs: 30,
             listen: "0.0.0.0:7891".to_owned(),
         }
