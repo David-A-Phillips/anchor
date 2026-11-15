@@ -11,6 +11,7 @@ use crate::base::{Error, Result, SourceId};
 use crate::config::provision::{
     OllamaManager, ProvisionEvent, ProvisionOptions, RebuildOptions, TeardownOptions,
 };
+use crate::config::wizard;
 use crate::config::{AnchorConfig, default_config_path};
 use crate::engine::query::{QueryDeps, QueryEngine, QueryMode, QueryRequest};
 use crate::engine::watcher::FileWatcher;
@@ -30,6 +31,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Interactive setup wizard: Ollama, model tiers, sources and trust levels, embeddings.
+    Setup {
+        /// Accept every default and ask nothing (installs Ollama if none is reachable).
+        #[arg(long)]
+        yes: bool,
+        /// Also run the bootstrap resilience test: wipe, remove and rebuild the managed Ollama.
+        #[arg(long)]
+        rebuild_test: bool,
+    },
     /// Write a starter configuration file.
     Init {
         /// Overwrite an existing file.
@@ -201,6 +211,29 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "Wrote {}. Add [[sources]] entries, then run `anchor ingest`.",
                 path.display()
             );
+        }
+        Command::Setup { yes, rebuild_test } => {
+            let path = cli.config.clone().unwrap_or_else(default_config_path);
+            let existing = if path.exists() {
+                Some(AnchorConfig::load(&path)?)
+            } else {
+                None
+            };
+            let env = wizard::WizardEnvironment::real(path, existing);
+            let options = wizard::WizardOptions {
+                yes,
+                rebuild_test,
+                ..wizard::WizardOptions::default()
+            };
+            let outcome =
+                wizard::run_wizard(&wizard::InquirePrompter::new(), &env, &options).await?;
+            if let Some(test) = &outcome.rebuild_test
+                && (test.refused.is_some() || test.error.is_some())
+            {
+                return Err(Error::invalid(
+                    "the bootstrap resilience test did not run to completion (see above)",
+                ));
+            }
         }
         Command::Ingest { source } => {
             let (config, _) = load_config(&cli.config)?;

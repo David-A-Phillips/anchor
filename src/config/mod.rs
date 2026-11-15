@@ -5,6 +5,7 @@ mod file;
 mod ollama;
 pub mod provision;
 mod validate;
+pub mod wizard;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
