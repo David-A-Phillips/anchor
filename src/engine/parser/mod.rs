@@ -9,9 +9,19 @@
 //! Parsing is CPU-bound: call it from a blocking thread, never from the async executor.
 
 mod config;
+mod extract;
+mod incremental;
 mod language;
 mod model;
+mod unit;
+
+#[cfg(test)]
+mod fixtures;
+#[cfg(test)]
+mod tests;
 
 pub use config::ParserConfig;
+pub use incremental::{IncrementalParser, ParseOutcome, SymbolDelta, parse_source};
 pub use language::Language;
 pub use model::{Import, ParsedFile, Reference, ReferenceKind, Symbol, SyntaxError, Visibility};
+pub use unit::build_file_unit;
