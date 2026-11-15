@@ -171,6 +171,9 @@ fn depth_survives_a_restart_and_never_gets_shallower() {
     assert_eq!(again.depth(&SourceId::new("payments-api")), Depth::Map);
 }
 
+/// Question text with the node keys a good answer must retrieve.
+type Questions = Vec<(String, Vec<String>)>;
+
 /// Measures what each depth costs and what it can answer, on the synthetic enterprise with known
 /// answers. Run with `--nocapture` to see the table.
 #[tokio::test(flavor = "multi_thread")]
@@ -204,7 +207,7 @@ async fn depth_trades_footprint_for_recall() {
         let mut recall = Vec::new();
         let mut flagged = 0usize;
         let mut asked = 0usize;
-        let groups: [(&str, Vec<(String, Vec<String>)>); 3] = [
+        let groups: [(&str, Questions); 3] = [
             (
                 "ownership",
                 truth
