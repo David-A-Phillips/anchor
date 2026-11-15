@@ -142,7 +142,9 @@ impl ProcessControl for SystemProcesses {
             // The server leads its own group (see `spawn`), so this also takes down model runners
             // that would otherwise keep GPU memory. Fall back to the single process when the
             // server was not started as a group leader.
-            StopSignal::Kill => killpg(pid, Signal::SIGKILL).or_else(|_| kill(pid, Signal::SIGKILL)),
+            StopSignal::Kill => {
+                killpg(pid, Signal::SIGKILL).or_else(|_| kill(pid, Signal::SIGKILL))
+            }
         };
         match result {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),

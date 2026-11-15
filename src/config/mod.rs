@@ -3,6 +3,7 @@
 
 mod file;
 mod ollama;
+pub mod provision;
 mod validate;
 
 use std::collections::BTreeMap;

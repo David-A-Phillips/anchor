@@ -8,7 +8,7 @@
 //! and which is verified here.
 
 use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -132,8 +132,13 @@ fn query(version: Option<&str>) -> String {
 /// the root lock, so nothing here can belong to a live operation.
 fn clean_leftovers(layout: &ManagedLayout) {
     for (dir, is_leftover) in [
-        (layout.cache_dir(), (|name: &str| name.ends_with(".part")) as fn(&str) -> bool),
-        (layout.root().to_path_buf(), |name: &str| name.starts_with("staging-")),
+        (
+            layout.cache_dir(),
+            (|name: &str| name.ends_with(".part")) as fn(&str) -> bool,
+        ),
+        (layout.root().to_path_buf(), |name: &str| {
+            name.starts_with("staging-")
+        }),
     ] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -181,7 +186,12 @@ pub(super) async fn install(request: InstallRequest<'_>) -> Result<InstallOutcom
 
     // The published listing; absent for mirrors that do not carry it.
     let listing_url = format!("{base}/{CHECKSUM_FILE}{suffix}");
-    let listing = match http.get(&listing_url).timeout(METADATA_TIMEOUT).send().await {
+    let listing = match http
+        .get(&listing_url)
+        .timeout(METADATA_TIMEOUT)
+        .send()
+        .await
+    {
         Ok(response) if response.status().is_success() => response.text().await.ok(),
         _ => None,
     };
@@ -189,7 +199,11 @@ pub(super) async fn install(request: InstallRequest<'_>) -> Result<InstallOutcom
         request
             .sha256
             .map(|hash| hash.trim().to_ascii_lowercase())
-            .or_else(|| listing.as_deref().and_then(|text| parse_checksums(text, file)))
+            .or_else(|| {
+                listing
+                    .as_deref()
+                    .and_then(|text| parse_checksums(text, file))
+            })
     };
 
     let download_started = Instant::now();
@@ -227,7 +241,11 @@ pub(super) async fn install(request: InstallRequest<'_>) -> Result<InstallOutcom
         for suffix_name in ARCHIVE_SUFFIXES {
             let file = format!("{stem}{suffix_name}");
             let url = format!("{base}/{file}{suffix}");
-            let response = http.get(&url).send().await.map_err(|err| download_error(&url, err))?;
+            let response = http
+                .get(&url)
+                .send()
+                .await
+                .map_err(|err| download_error(&url, err))?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 last_error = Some(download_error(&url, "HTTP 404 Not Found"));
                 continue;
@@ -236,8 +254,15 @@ pub(super) async fn install(request: InstallRequest<'_>) -> Result<InstallOutcom
                 return Err(download_error(&url, format!("HTTP {}", response.status())));
             }
             let expected = expected_for(&file);
-            let meta = download(response, &url, &cache, &file, expected.as_deref(), request.progress)
-                .await?;
+            let meta = download(
+                response,
+                &url,
+                &cache,
+                &file,
+                expected.as_deref(),
+                request.progress,
+            )
+            .await?;
             let meta = CacheMeta {
                 version: request.version.map(str::to_owned),
                 ..meta
@@ -276,12 +301,18 @@ pub(super) async fn install(request: InstallRequest<'_>) -> Result<InstallOutcom
                 (request.progress)(ProvisionEvent::Extract { entries });
             }
             joined = &mut task => {
+                while let Ok(entries) = receiver.try_recv() {
+                    (request.progress)(ProvisionEvent::Extract { entries });
+                }
                 break joined.map_err(|err| io_error("extraction task failed", io::Error::other(err)))?;
             }
         }
     };
     if let Err(err) = extracted {
-        if matches!(err, ProvisionError::InvalidArchive { .. } | ProvisionError::UnsafeArchiveEntry { .. }) {
+        if matches!(
+            err,
+            ProvisionError::InvalidArchive { .. } | ProvisionError::UnsafeArchiveEntry { .. }
+        ) {
             // A bad archive must not be picked up from the cache by the next attempt.
             let _ = tokio::fs::remove_file(&archive).await;
             let _ = tokio::fs::remove_file(cache.join(format!("{file}.json"))).await;
@@ -319,7 +350,9 @@ async fn download(
     let total = response.content_length();
     let partial = cache.join(format!("{file}.part"));
     let write_error = |err| io_error(format!("cannot write {}", partial.display()), err);
-    let mut output = tokio::fs::File::create(&partial).await.map_err(write_error)?;
+    let mut output = tokio::fs::File::create(&partial)
+        .await
+        .map_err(write_error)?;
     progress(ProvisionEvent::Download {
         file: file.to_owned(),
         received: 0,
@@ -362,8 +395,8 @@ async fn download(
     let verified = match result {
         Ok(received) => {
             let path = partial.clone();
-            blocking(move || hash_file(&path)).await.and_then(|(actual, size)| {
-                match expected_sha256 {
+            blocking(move || hash_file(&path)).await.and_then(
+                |(actual, size)| match expected_sha256 {
                     Some(expected) if expected != actual => Err(ProvisionError::ChecksumMismatch {
                         file: file.to_owned(),
                         expected: expected.to_owned(),
@@ -371,8 +404,8 @@ async fn download(
                     }),
                     _ if size != received => Err(download_error(url, "file changed while hashing")),
                     _ => Ok((actual, size)),
-                }
-            })
+                },
+            )
         }
         Err(err) => Err(err),
     };
@@ -465,14 +498,19 @@ fn extract(archive: &Path, staging: &Path, on_entry: &dyn Fn(u64)) -> Result<(),
     let mut file = std::fs::File::open(archive)
         .map_err(|err| io_error(format!("cannot open {}", archive.display()), err))?;
     let mut magic = [0u8; 4];
-    let read = file.read(&mut magic).map_err(|err| invalid(err.to_string()))?;
+    let read = file
+        .read(&mut magic)
+        .map_err(|err| invalid(err.to_string()))?;
     let file = std::fs::File::open(archive)
         .map_err(|err| io_error(format!("cannot open {}", archive.display()), err))?;
     // Decided by content, not by name: mirrors rename files.
     let reader: Box<dyn Read> = if read == 4 && magic == ZSTD_MAGIC {
-        let mut decoder = zstd::stream::read::Decoder::new(file).map_err(|err| invalid(err.to_string()))?;
+        let mut decoder =
+            zstd::stream::read::Decoder::new(file).map_err(|err| invalid(err.to_string()))?;
         // Official archives are compressed with a long window, beyond the decoder's default limit.
-        decoder.window_log_max(31).map_err(|err| invalid(err.to_string()))?;
+        decoder
+            .window_log_max(31)
+            .map_err(|err| invalid(err.to_string()))?;
         Box::new(decoder)
     } else if read >= 2 && magic[..2] == GZIP_MAGIC {
         Box::new(flate2::read::GzDecoder::new(io::BufReader::new(file)))
@@ -486,7 +524,10 @@ fn extract(archive: &Path, staging: &Path, on_entry: &dyn Fn(u64)) -> Result<(),
     let mut count = 0u64;
     for entry in tar.entries().map_err(|err| invalid(err.to_string()))? {
         let mut entry = entry.map_err(|err| invalid(err.to_string()))?;
-        let path = entry.path().map_err(|err| invalid(err.to_string()))?.into_owned();
+        let path = entry
+            .path()
+            .map_err(|err| invalid(err.to_string()))?
+            .into_owned();
         let kind = entry.header().entry_type();
         if kind.is_pax_global_extensions() {
             continue;
@@ -501,18 +542,30 @@ fn extract(archive: &Path, staging: &Path, on_entry: &dyn Fn(u64)) -> Result<(),
                 .ok_or_else(|| unsafe_entry(&path, "link without a target"))?;
             // Symlink targets are relative to the link's directory, hard-link targets to the
             // archive root.
-            let start = if kind.is_symlink() { depth.saturating_sub(1) } else { 0 };
+            let start = if kind.is_symlink() {
+                depth.saturating_sub(1)
+            } else {
+                0
+            };
             if contained_depth(start, &target).is_none() {
                 return Err(unsafe_entry(&path, "link pointing outside the archive"));
             }
         } else if !(kind.is_file() || kind.is_dir()) {
-            return Err(unsafe_entry(&path, "unsupported entry type (device, fifo, ...)"));
+            return Err(unsafe_entry(
+                &path,
+                "unsupported entry type (device, fifo, ...)",
+            ));
         }
         // `unpack_in` re-checks containment on the real filesystem (symlinked parents) and keeps
         // the executable bits of the entry's mode.
-        let unpacked = entry.unpack_in(staging).map_err(|err| invalid(format!("{}: {err}", path.display())))?;
+        let unpacked = entry
+            .unpack_in(staging)
+            .map_err(|err| invalid(format!("{}: {err}", path.display())))?;
         if !unpacked {
-            return Err(unsafe_entry(&path, "entry would be written outside the destination"));
+            return Err(unsafe_entry(
+                &path,
+                "entry would be written outside the destination",
+            ));
         }
         count += 1;
         if count.is_multiple_of(100) {
@@ -526,21 +579,25 @@ fn extract(archive: &Path, staging: &Path, on_entry: &dyn Fn(u64)) -> Result<(),
     Ok(())
 }
 
-/// Location of the staged archive for tests and diagnostics.
-#[allow(dead_code)]
-pub(super) fn cached_archive(layout: &ManagedLayout, file: &str) -> PathBuf {
-    layout.cache_dir().join(file)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn artifact_names_follow_install_sh() {
-        assert_eq!(artifact_stem("linux", "x86_64").expect("amd64"), "ollama-linux-amd64");
-        assert_eq!(artifact_stem("linux", "aarch64").expect("arm64"), "ollama-linux-arm64");
-        for (os, arch) in [("macos", "aarch64"), ("windows", "x86_64"), ("linux", "riscv64")] {
+        assert_eq!(
+            artifact_stem("linux", "x86_64").expect("amd64"),
+            "ollama-linux-amd64"
+        );
+        assert_eq!(
+            artifact_stem("linux", "aarch64").expect("arm64"),
+            "ollama-linux-arm64"
+        );
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("windows", "x86_64"),
+            ("linux", "riscv64"),
+        ] {
             let err = artifact_stem(os, arch).expect_err("unsupported");
             assert!(err.to_string().contains("ollama.base_url"), "{err}");
         }
@@ -551,11 +608,21 @@ mod tests {
     #[test]
     fn checksum_listing_is_parsed() {
         let hash = "87bfafb2acbc89b2e6a1be0a9043de6aa75fb450696f86bc426e65fc448f788d";
-        let listing = format!("abc  ./short\n{hash}  ./ollama-linux-amd64.tar.zst\n{hash} *plain.tgz\n");
-        assert_eq!(parse_checksums(&listing, "ollama-linux-amd64.tar.zst").as_deref(), Some(hash));
-        assert_eq!(parse_checksums(&listing, "plain.tgz").as_deref(), Some(hash));
+        let listing =
+            format!("abc  ./short\n{hash}  ./ollama-linux-amd64.tar.zst\n{hash} *plain.tgz\n");
+        assert_eq!(
+            parse_checksums(&listing, "ollama-linux-amd64.tar.zst").as_deref(),
+            Some(hash)
+        );
+        assert_eq!(
+            parse_checksums(&listing, "plain.tgz").as_deref(),
+            Some(hash)
+        );
         assert_eq!(parse_checksums(&listing, "short"), None);
-        assert_eq!(parse_checksums(&listing, "ollama-linux-arm64.tar.zst"), None);
+        assert_eq!(
+            parse_checksums(&listing, "ollama-linux-arm64.tar.zst"),
+            None
+        );
     }
 
     #[test]

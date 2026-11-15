@@ -261,7 +261,9 @@ pub(super) fn check_root(root: &Path, home: Option<&Path>) -> Result<PathBuf, Pr
     if parent.parent().is_none() {
         return Err(refuse("it is a top-level system directory"));
     }
-    if parent == Path::new("/home") || parent == Path::new("/Users") || canonical == Path::new("/root")
+    if parent == Path::new("/home")
+        || parent == Path::new("/Users")
+        || canonical == Path::new("/root")
     {
         return Err(refuse("it is a home directory"));
     }
@@ -316,7 +318,12 @@ pub(super) fn remove_inside(
     let meta = match std::fs::symlink_metadata(target) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(io_error(format!("cannot inspect {}", target.display()), err)),
+        Err(err) => {
+            return Err(io_error(
+                format!("cannot inspect {}", target.display()),
+                err,
+            ));
+        }
     };
     let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
         return Err(refuse("it has no parent directory"));
@@ -451,12 +458,19 @@ mod tests {
 
         assert!(remove_inside(&root, &outside).is_err());
         assert!(remove_inside(&root, &root).is_err());
+        std::fs::create_dir_all(root.join("models")).expect("mkdir");
         assert!(remove_inside(&root, &root.join("models").join("..").join("..")).is_err());
-        assert_eq!(remove_inside(&root, &root.join("absent")).expect("absent"), None);
+        assert_eq!(
+            remove_inside(&root, &root.join("absent")).expect("absent"),
+            None
+        );
 
+        std::fs::remove_dir(root.join("models")).expect("rmdir");
         // A symlink inside the root pointing outside: the link goes, the target stays.
         std::os::unix::fs::symlink(&outside, root.join("models")).expect("symlink");
-        let removed = remove_inside(&root, &root.join("models")).expect("unlink").expect("some");
+        let removed = remove_inside(&root, &root.join("models"))
+            .expect("unlink")
+            .expect("some");
         assert_eq!(removed.bytes, 0);
         assert!(outside.join("precious").exists());
 
@@ -467,7 +481,9 @@ mod tests {
 
         std::fs::create_dir_all(root.join("cache/sub")).expect("mkdir");
         std::fs::write(root.join("cache/sub/a"), [0u8; 10]).expect("write");
-        let removed = remove_inside(&root, &root.join("cache")).expect("rm").expect("some");
+        let removed = remove_inside(&root, &root.join("cache"))
+            .expect("rm")
+            .expect("some");
         assert_eq!(removed.bytes, 10);
         assert!(!root.join("cache").exists());
     }
@@ -476,7 +492,9 @@ mod tests {
     async fn lock_is_exclusive_and_times_out() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("lock");
-        let held = RootLock::acquire(&path, Duration::from_secs(1)).await.expect("first");
+        let held = RootLock::acquire(&path, Duration::from_secs(1))
+            .await
+            .expect("first");
         if cfg!(unix) {
             let err = RootLock::acquire(&path, Duration::from_millis(120))
                 .await
@@ -484,7 +502,9 @@ mod tests {
             assert!(matches!(err, ProvisionError::LockTimeout { .. }));
         }
         drop(held);
-        RootLock::acquire(&path, Duration::from_secs(1)).await.expect("after release");
+        RootLock::acquire(&path, Duration::from_secs(1))
+            .await
+            .expect("after release");
     }
 
     #[test]
