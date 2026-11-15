@@ -167,9 +167,11 @@ impl SourceConfig {
             SourceKind::Repo | SourceKind::ApiPortal | SourceKind::OrgModel => {
                 TrustLevel::SourceOfTruth
             }
-            SourceKind::Wiki | SourceKind::Jira | SourceKind::CodeReview | SourceKind::Issues => {
-                TrustLevel::ReferenceOnly
-            }
+            SourceKind::Wiki
+            | SourceKind::Jira
+            | SourceKind::CodeReview
+            | SourceKind::Issues
+            | SourceKind::Derived => TrustLevel::ReferenceOnly,
         }
     }
 

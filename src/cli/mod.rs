@@ -72,6 +72,9 @@ enum Command {
         /// Retrieval only: no model call.
         #[arg(long)]
         retrieval_only: bool,
+        /// Ask a model to write a prose answer from the retrieved evidence (slower).
+        #[arg(long)]
+        explain: bool,
     },
     /// Run the daemon: initial scan, file watching and the dashboard.
     Daemon {
@@ -89,6 +92,12 @@ enum Command {
     },
     /// List open gap-analysis backlog items.
     Backlog,
+    /// Let the local model summarise and tag pages, tickets, pull requests and APIs.
+    Enrich {
+        /// Maximum nodes to process in this run.
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+    },
     /// Score the engine against questions with known answers (see `anchor demo`).
     Eval {
         /// The ground-truth file (`ground_truth.json`).
@@ -422,11 +431,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
             json,
             local_only,
             retrieval_only,
+            explain,
         } => {
             let (config, _) = load_config(&cli.config)?;
             let engine = open_engine(config).await?;
             install_remote(&engine)?;
             let mut request = QueryRequest::new(text);
+            request.explain = explain;
             request.mode = if retrieval_only {
                 QueryMode::RetrievalOnly
             } else if local_only {
@@ -483,6 +494,11 @@ async fn dispatch(cli: Cli) -> Result<()> {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                             if let Err(err) = embedder.embed_pending().await {
                                 tracing::warn!("embedding failed: {err}");
+                            }
+                            // Tag and summarise new material in the background, a little at a
+                            // time; nobody waits on this.
+                            if let Err(err) = embedder.enrich(25).await {
+                                tracing::warn!("enrichment failed: {err}");
                             }
                         }
                         Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -826,6 +842,26 @@ async fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 print!("{}", eval::render(&report));
             }
+            engine.flush()?;
+        }
+        Command::Enrich { limit } => {
+            let (config, _) = load_config(&cli.config)?;
+            let engine = open_engine(config).await?;
+            if engine
+                .router()
+                .model_info(crate::base::ModelTier::System1)
+                .is_none()
+            {
+                return Err(Error::invalid(
+                    "enrichment needs a System 1 model: set [models.system1] (see `anchor ollama provision`)",
+                ));
+            }
+            let report = engine.enrich(limit).await?;
+            println!(
+                "Enriched {} nodes ({} unchanged, {} failed, {} left for a later run).",
+                report.enriched, report.unchanged, report.failed, report.remaining
+            );
+            engine.embed_pending().await?;
             engine.flush()?;
         }
         Command::Ollama { action } => {

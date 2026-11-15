@@ -523,6 +523,7 @@ impl Engine {
             SourceKind::Jira => 4,
             SourceKind::CodeReview => 5,
             SourceKind::Issues => 6,
+            SourceKind::Derived => 7,
         };
         let mut sources: Vec<&SourceConfig> =
             self.config.sources.iter().filter(|s| s.enabled).collect();
@@ -555,6 +556,8 @@ impl Engine {
             );
         match source.kind {
             _ if skipped => {}
+            // Derived facts are produced by `enrich`, not by scanning anything.
+            SourceKind::Derived => complete = false,
             SourceKind::Repo => {
                 complete = self.scan_repo(source, &root, &mut report, &mut produced)?
             }

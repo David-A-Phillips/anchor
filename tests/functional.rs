@@ -995,7 +995,11 @@ async fn query_mode_local_only_never_reaches_the_cloud_but_auto_does() {
         router: rig.router.clone(),
         backlog: None,
         graph_config: pipeline.engine.config().graph.clone(),
-        query_config: pipeline.engine.config().query.clone(),
+        // This test is about which tier writes an answer, so model-written answers are on.
+        query_config: anchor::engine::query::QueryConfig {
+            model_answers: true,
+            ..pipeline.engine.config().query.clone()
+        },
     });
     let question =
         "Why is PAY-2 blocked and what does PAY-1 have to do with the payments-api retries?";
@@ -1026,5 +1030,6 @@ async fn query_mode_local_only_never_reaches_the_cloud_but_auto_does() {
     rig.ledger.flush().unwrap();
     let summary = rig.ledger.summary(TimeRange::default()).unwrap();
     assert_eq!(summary.cloud.calls as usize, rig.anthropic.hits());
-    assert!(summary.local.calls >= 1);
+    // The rules read this question, so the local model is never asked to classify it.
+    assert_eq!(summary.local.calls, 0);
 }

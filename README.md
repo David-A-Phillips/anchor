@@ -114,11 +114,13 @@ The exact accepted formats are documented at the top of each parser module under
 | `anchor setup` | Interactive setup wizard |
 | `anchor init [--force]` | Write a starter configuration |
 | `anchor ingest [--source ID]` | Scan sources into the graph (incremental) |
-| `anchor query "…" [--json] [--local-only] [--retrieval-only]` | Ask a question |
+| `anchor query "…" [--json] [--explain] [--local-only] [--retrieval-only]` | Ask a question (`--explain`: model-written prose) |
 | `anchor daemon [--no-web]` | Scan, watch files, serve the dashboard |
 | `anchor status` | Graph and source statistics |
 | `anchor spend [--days N]` | Token usage and estimated cost, local vs. cloud |
 | `anchor backlog` | Open gap-analysis items |
+| `anchor enrich [--limit N]` | Summarise and tag pages, tickets, PRs and APIs with the local model |
+| `anchor eval --truth FILE` | Score the engine against questions with known answers |
 | `anchor fetch OWNER/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
 | `anchor deepen SOURCE [--depth map\|full]` | Ingest a source more deeply |
 | `anchor export [-o FILE]` / `anchor import FILE` | Write or merge a signed `.contextpack` |
@@ -180,6 +182,31 @@ down, rebuilds and verifies again.
 
 `scripts/fetch-corpus.sh` fetches a real-world corpus (Linux, Kubernetes, Grafana, exported pull-
 request reviews) into `./corpus` for scale testing.
+
+## What the models do
+
+Models stay off the interactive path. Questions are classified by rules in microseconds and
+answered straight from the graph; nothing waits on a model unless you ask for prose.
+
+| Where | What the model does | When |
+|-------|---------------------|------|
+| Classification | The local System 1 model reads a question only when the rules cannot classify it (multi-hop "who leads the team that owns…" questions). Its reading is cached, so a repeated question is instant. | At question time, as a fallback |
+| Answers | `anchor query --explain` (or `query.model_answers = true`) has a model write a prose answer from the retrieved evidence. | Only on request |
+| Enrichment | `anchor enrich` has System 1 summarise and tag wiki pages, tickets, pull requests and APIs, and name the entities they are about. Tags become searchable aliases; named entities become links. Stored as a `reference_only` source, so it never overrides an authoritative fact. | In the background, after ingestion (the daemon does it automatically) |
+
+Models are never used to search the graph.
+
+To measure what they change, generate a question set with known answers and score it with and
+without a model configured:
+
+```sh
+anchor demo --out /tmp/demo --scale small
+anchor --config /tmp/demo/anchor.toml ingest
+anchor --config /tmp/demo/anchor.toml eval --truth /tmp/demo/ground_truth.json
+```
+
+`anchor eval` reports, per question category, how often the intent was read correctly, context
+recall, whether the top answer was right, latency per question, and model calls and tokens.
 
 ## Issue boards, discussions and pull requests
 

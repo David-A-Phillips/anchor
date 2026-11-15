@@ -15,6 +15,7 @@
 pub mod core;
 pub mod depth;
 pub mod embed;
+pub mod enrich;
 pub mod graph;
 pub mod ingest;
 pub mod parser;

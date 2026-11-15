@@ -257,6 +257,8 @@ string_enum! {
         CodeReview = 6 => "code_review",
         /// An issue board or discussion board export (GitHub issues and discussions).
         Issues = 7 => "issues",
+        /// Facts Anchor derived itself (model-written summaries and tags). Never authoritative.
+        Derived = 8 => "derived",
     }
 }
 
@@ -279,6 +281,8 @@ string_enum! {
         Ticket = 7 => "ticket",
         /// One pull request with its review threads.
         PullRequest = 8 => "pull_request",
+        /// A model-written summary and tags for one node.
+        Enrichment = 9 => "enrichment",
     }
 }
 

@@ -140,6 +140,8 @@ pub struct TieredRouter {
     spend: Option<Arc<dyn SpendTracker>>,
     retry: RetryPolicy,
     system1_down_until: Mutex<Option<Instant>>,
+    /// Model classifications of questions the rules could not read, by normalised question.
+    intents: Mutex<lru::LruCache<String, QueryIntent>>,
 }
 
 impl TieredRouter {
@@ -164,6 +166,9 @@ impl TieredRouter {
             spend: None,
             retry: RetryPolicy::default(),
             system1_down_until: Mutex::new(None),
+            intents: Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(4096).unwrap_or(std::num::NonZeroUsize::MIN),
+            )),
         }
     }
 
@@ -421,17 +426,33 @@ impl TieredRouter {
         }
     }
 
-    /// Intent parsing and query classification. Uses the System 1 model when one is usable and
-    /// falls back to the [`HeuristicClassifier`] when there is none, the call fails, or its
-    /// output is unusable. Never fails; `QueryIntent::classifier` tells which one answered.
+    /// Intent parsing and query classification. Deterministic rules ([`HeuristicClassifier`])
+    /// answer first; the System 1 model is consulted only for questions the rules classify as
+    /// `General`, and its classifications are cached. Never fails; `QueryIntent::classifier` tells which one answered.
     pub async fn classify(&self, query: &str, query_id: Option<&str>) -> QueryIntent {
+        // Rules first: they are instant and, for the question shapes they know, more accurate
+        // than a small model. The model is only asked about questions the rules cannot read,
+        // and its answer is remembered so a repeated question is instant too.
+        let by_rules = HeuristicClassifier.classify(query);
+        if by_rules.kind != crate::base::IntentKind::General {
+            return by_rules;
+        }
+        let normalised = query
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if let Some(known) = self.intents.lock().get(&normalised) {
+            return known.clone();
+        }
         if let Some(completion) = self.system1_once(intent_request(query, query_id)).await {
             if let Some(intent) = parse_intent(&completion.text, query) {
+                self.intents.lock().put(normalised, intent.clone());
                 return intent;
             }
             tracing::debug!("System 1 returned an unusable classification");
         }
-        HeuristicClassifier.classify(query)
+        by_rules
     }
 
     /// Initial graph filtering: a relevance score in `[0, 1]` for every candidate, in input
@@ -905,7 +926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classify_uses_the_model_and_falls_back_to_the_heuristic() {
+    async fn classify_asks_the_model_only_what_the_rules_cannot_read() {
         let query = "Who owns API X?";
         let (bare, _) = router(None, None, RoutingConfig::default());
         let intent = bare.classify(query, None).await;
@@ -921,6 +942,13 @@ mod tests {
             .push_error(unavailable());
         let (router, sink) = router(Some(&local), None, RoutingConfig::default());
 
+        // A question the rules recognise never reaches the model.
+        let intent = router.classify(query, None).await;
+        assert_eq!(intent.classifier, ClassifierKind::Heuristic);
+        assert_eq!(local.calls(), 0);
+
+        // One they cannot read does, and the model's answer is cached.
+        let query = "Give me the lowdown on X";
         let intent = router.classify(query, Some("q-7")).await;
         assert_eq!(
             (intent.kind, intent.classifier),
@@ -930,12 +958,16 @@ mod tests {
         let sent = &local.requests()[0];
         assert_eq!(sent.purpose, CallPurpose::Classify);
         assert_eq!(sent.query_id.as_deref(), Some("q-7"));
+        let again = router.classify("give me the  lowdown on X", None).await;
+        assert_eq!(again.classifier, ClassifierKind::Model);
+        assert_eq!(local.calls(), 1);
 
         // Garbage output: heuristic answer, but the call is still ledgered.
+        let query = "Give me the lowdown on Y";
         let intent = router.classify(query, None).await;
         assert_eq!(
             (intent.kind, intent.classifier),
-            (IntentKind::Ownership, ClassifierKind::Heuristic)
+            (IntentKind::General, ClassifierKind::Heuristic)
         );
         assert_eq!(sink.len(), 2);
 

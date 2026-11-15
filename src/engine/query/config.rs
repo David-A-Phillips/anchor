@@ -25,6 +25,10 @@ pub struct QueryConfig {
     pub max_context_tokens: usize,
     /// Queries answered with confidence below this value are logged to the backlog.
     pub confidence_threshold: f32,
+    /// Let a model write the answer when the graph cannot answer directly. Off by default:
+    /// answers come straight from the graph in milliseconds; `anchor query --explain` asks a
+    /// model for prose on demand.
+    pub model_answers: bool,
     /// Behaviour when a question touches a shallow source.
     pub on_shallow: ShallowPolicy,
 }
@@ -35,6 +39,7 @@ impl Default for QueryConfig {
             top_k: 12,
             max_context_tokens: 6000,
             confidence_threshold: 0.55,
+            model_answers: false,
             on_shallow: ShallowPolicy::Background,
         }
     }

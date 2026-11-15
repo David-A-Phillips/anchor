@@ -78,6 +78,9 @@ pub struct QueryRequest {
     /// Context token budget; defaults to [`QueryConfig::max_context_tokens`].
     #[serde(default)]
     pub max_context_tokens: Option<usize>,
+    /// Ask a model to write the answer even when [`QueryConfig::model_answers`] is off.
+    #[serde(default)]
+    pub explain: bool,
 }
 
 impl QueryRequest {
@@ -88,6 +91,7 @@ impl QueryRequest {
             mode: QueryMode::Auto,
             top_k: None,
             max_context_tokens: None,
+            explain: false,
         }
     }
 }
@@ -968,7 +972,10 @@ impl QueryEngine {
             };
             route.reason = format!("{:?}", decision.reason);
             answer = retrieved.direct_answer.take();
-            let needs_model = answer.is_none() || tier == Some(ModelTier::System2);
+            // Models write answers only when asked to: retrieval and direct answers never wait
+            // on one.
+            let wanted = request.explain || self.deps.query_config.model_answers;
+            let needs_model = wanted && (answer.is_none() || tier == Some(ModelTier::System2));
             if let (Some(tier), true) = (tier, needs_model && !retrieved.bundle.items.is_empty()) {
                 let prompt = self.prompt(&request.query, &retrieved.bundle, answer.as_deref());
                 let completion = CompletionRequest::prompt(CallPurpose::Synthesize, prompt)

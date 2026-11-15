@@ -71,50 +71,51 @@ pub async fn evaluate(
     let mut report = EvalReport::default();
     let no_phrases: Vec<String> = Vec::new();
 
-    let mut groups: Vec<(&str, Vec<Question<'_>>)> = Vec::new();
-    groups.push((
-        "ownership",
-        truth
-            .ownership
-            .iter()
-            .map(|q| Question {
-                text: &q.question,
-                intents: &[IntentKind::Ownership],
-                expected: &q.expected_owner_keys,
-                phrases: &no_phrases,
-            })
-            .collect(),
-    ));
-    groups.push((
-        "justification",
-        truth
-            .justification
-            .iter()
-            .map(|q| Question {
-                text: &q.question,
-                intents: &[IntentKind::Justification, IntentKind::Status],
-                expected: &q.expected_keys,
-                phrases: &q.key_phrases,
-            })
-            .collect(),
-    ));
-    groups.push((
-        "relationships",
-        truth
-            .relationships
-            .iter()
-            .map(|q| Question {
-                text: &q.question,
-                intents: &[
-                    IntentKind::Ownership,
-                    IntentKind::Dependency,
-                    IntentKind::Definition,
-                ],
-                expected: &q.expected_keys,
-                phrases: &no_phrases,
-            })
-            .collect(),
-    ));
+    let groups: Vec<(&str, Vec<Question<'_>>)> = vec![
+        (
+            "ownership",
+            truth
+                .ownership
+                .iter()
+                .map(|q| Question {
+                    text: &q.question,
+                    intents: &[IntentKind::Ownership],
+                    expected: &q.expected_owner_keys,
+                    phrases: &no_phrases,
+                })
+                .collect(),
+        ),
+        (
+            "justification",
+            truth
+                .justification
+                .iter()
+                .map(|q| Question {
+                    text: &q.question,
+                    intents: &[IntentKind::Justification, IntentKind::Status],
+                    expected: &q.expected_keys,
+                    phrases: &q.key_phrases,
+                })
+                .collect(),
+        ),
+        (
+            "relationships",
+            truth
+                .relationships
+                .iter()
+                .map(|q| Question {
+                    text: &q.question,
+                    intents: &[
+                        IntentKind::Ownership,
+                        IntentKind::Dependency,
+                        IntentKind::Definition,
+                    ],
+                    expected: &q.expected_keys,
+                    phrases: &no_phrases,
+                })
+                .collect(),
+        ),
+    ];
 
     for (name, questions) in groups {
         let mut score = CategoryScore {
