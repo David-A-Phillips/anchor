@@ -64,8 +64,9 @@ CREATE TABLE node_claims (
 ) WITHOUT ROWID;
 CREATE INDEX node_claims_node ON node_claims(node_id);
 CREATE TABLE aliases (
-    kind INTEGER NOT NULL, alias TEXT NOT NULL, node_id INTEGER NOT NULL,
-    PRIMARY KEY (kind, alias, node_id)
+    kind INTEGER NOT NULL, alias TEXT NOT NULL, source TEXT NOT NULL, path TEXT NOT NULL,
+    node_id INTEGER NOT NULL,
+    PRIMARY KEY (kind, alias, source, path, node_id)
 ) WITHOUT ROWID;
 CREATE INDEX aliases_node ON aliases(node_id);
 CREATE TABLE edges (
@@ -411,64 +412,95 @@ fn node_by_key(tx: &Connection, key: &str) -> Result<Option<i64>> {
 
 fn alias_candidates(tx: &Connection, kind: NodeKind, alias: &str) -> Result<Vec<i64>> {
     let mut statement = tx.prepare_cached(
-        "SELECT node_id FROM aliases WHERE kind = ?1 AND alias = ?2 ORDER BY node_id",
+        "SELECT DISTINCT node_id FROM aliases WHERE kind = ?1 AND alias = ?2 ORDER BY node_id LIMIT 64",
     )?;
     let rows = statement.query_map(params![kind.code(), alias], |row| row.get(0))?;
     Ok(rows.collect::<std::result::Result<Vec<i64>, _>>()?)
 }
 
-fn scope_rank(tx: &Connection, node: i64, lookup: &Lookup) -> Result<u32> {
-    let Some(scope) = &lookup.scope else {
-        return Ok(0);
+/// Up to `limit` candidates for an alias, optionally restricted to a source and to a path
+/// (exactly, or as a directory prefix). Every form is served by the primary key of `aliases`.
+fn scoped_candidates(
+    tx: &Connection,
+    kind: NodeKind,
+    alias: &str,
+    source: Option<&str>,
+    path: Option<(&str, bool)>,
+    limit: usize,
+) -> Result<Vec<i64>> {
+    let (sql, low, high) = match (source, path) {
+        (None, _) | (Some(_), None) => (
+            "SELECT DISTINCT node_id FROM aliases WHERE kind = ?1 AND alias = ?2
+             AND (?3 IS NULL OR source = ?3) AND ?4 IS NULL AND ?5 IS NULL ORDER BY node_id LIMIT ?6",
+            None,
+            None,
+        ),
+        (Some(_), Some((path, true))) => (
+            "SELECT DISTINCT node_id FROM aliases WHERE kind = ?1 AND alias = ?2 AND source = ?3
+             AND path = ?4 AND ?5 IS NULL ORDER BY node_id LIMIT ?6",
+            Some(path.to_owned()),
+            None,
+        ),
+        (Some(_), Some((prefix, false))) => (
+            "SELECT DISTINCT node_id FROM aliases WHERE kind = ?1 AND alias = ?2 AND source = ?3
+             AND path >= ?4 AND path < ?5 ORDER BY node_id LIMIT ?6",
+            Some(format!("{prefix}/")),
+            Some(format!("{prefix}0")),
+        ),
     };
-    let (source, path): (String, Option<String>) = tx
-        .prepare_cached("SELECT source, path FROM nodes WHERE id = ?1")?
-        .query_row([node], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    if scope.source.as_ref().map(SourceId::as_str) != Some(source.as_str()) {
-        return Ok(0);
-    }
-    let (Some(wanted), Some(path)) = (&scope.path, &path) else {
-        return Ok(1);
-    };
-    if wanted == path {
-        return Ok(1_000_000);
-    }
-    let shared = wanted
-        .split('/')
-        .zip(path.split('/'))
-        .take_while(|(a, b)| a == b)
-        .count() as u32;
-    Ok(2 + shared)
+    let mut statement = tx.prepare_cached(sql)?;
+    let rows = statement.query_map(
+        params![kind.code(), alias, source, low, high, limit as i64],
+        |row| row.get(0),
+    )?;
+    Ok(rows.collect::<std::result::Result<Vec<i64>, _>>()?)
 }
 
 fn resolve_lookup(tx: &Connection, lookup: &Lookup) -> Result<Resolution> {
+    let verdict = |candidates: Vec<i64>| match candidates.len() {
+        1 => Resolution::Resolved(NodeId(candidates[0])),
+        _ => Resolution::Ambiguous(candidates.into_iter().map(NodeId).collect()),
+    };
     for kind in &lookup.kinds {
         let alias = keys::normalize_alias(*kind, &lookup.text);
         if alias.is_empty() {
             continue;
         }
-        let candidates = alias_candidates(tx, *kind, &alias)?;
-        match candidates.len() {
+        let all = scoped_candidates(tx, *kind, &alias, None, None, 8)?;
+        match all.len() {
             0 => continue,
-            1 => return Ok(Resolution::Resolved(NodeId(candidates[0]))),
-            _ => {
-                let mut ranked = Vec::with_capacity(candidates.len());
-                for candidate in &candidates {
-                    ranked.push((scope_rank(tx, *candidate, lookup)?, *candidate));
+            1 => return Ok(Resolution::Resolved(NodeId(all[0]))),
+            _ => {}
+        }
+        // Several candidates: the closest to the scope wins; ties are ambiguous.
+        let scope = lookup.scope.as_ref();
+        let Some(source) = scope
+            .and_then(|scope| scope.source.as_ref())
+            .map(SourceId::as_str)
+        else {
+            return Ok(verdict(all));
+        };
+        if let Some(path) = scope.and_then(|scope| scope.path.as_deref()) {
+            let same = scoped_candidates(tx, *kind, &alias, Some(source), Some((path, true)), 2)?;
+            if !same.is_empty() {
+                return Ok(verdict(same));
+            }
+            let mut dir = path;
+            while let Some((parent, _)) = dir.rsplit_once('/') {
+                let near =
+                    scoped_candidates(tx, *kind, &alias, Some(source), Some((parent, false)), 2)?;
+                if !near.is_empty() {
+                    return Ok(verdict(near));
                 }
-                let best = ranked.iter().map(|(rank, _)| *rank).max().unwrap_or(0);
-                let winners: Vec<i64> = ranked
-                    .iter()
-                    .filter(|(rank, _)| *rank == best)
-                    .map(|(_, id)| *id)
-                    .collect();
-                return Ok(if winners.len() == 1 {
-                    Resolution::Resolved(NodeId(winners[0]))
-                } else {
-                    Resolution::Ambiguous(candidates.into_iter().map(NodeId).collect())
-                });
+                dir = parent;
             }
         }
+        let in_source = scoped_candidates(tx, *kind, &alias, Some(source), None, 2)?;
+        return Ok(if in_source.is_empty() {
+            verdict(all)
+        } else {
+            verdict(in_source)
+        });
     }
     Ok(Resolution::NotFound)
 }
@@ -615,9 +647,9 @@ fn refresh_node(tx: &Connection, touched: &mut Touched, node: i64) -> Result<()>
     }
     for alias in &aliases {
         tx.prepare_cached(
-            "INSERT OR IGNORE INTO aliases (kind, alias, node_id) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO aliases (kind, alias, source, path, node_id) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?
-        .execute(params![kind.code(), alias, node])?;
+        .execute(params![kind.code(), alias, first.source, path.as_deref().unwrap_or(""), node])?;
     }
     touched.names.extend(aliases);
     Ok(())
@@ -699,8 +731,12 @@ fn relink(tx: &Connection, touched: &mut Touched) -> Result<()> {
     for name in &names {
         // Lookups store the text as written; match its normalised forms too.
         let mut statement = tx.prepare_cached(
-            "SELECT id FROM edge_claims WHERE edge_id IS NULL
-             AND (from_text = ?1 OR to_text = ?1 OR from_text = ?2 OR to_text = ?2) LIMIT ?3",
+            "SELECT id FROM edge_claims INDEXED BY edge_claims_from
+                 WHERE from_text IN (?1, ?2) AND edge_id IS NULL
+             UNION
+             SELECT id FROM edge_claims INDEXED BY edge_claims_to
+                 WHERE to_text IN (?1, ?2) AND edge_id IS NULL
+             LIMIT ?3",
         )?;
         let slug = keys::slugify(name);
         for id in statement.query_map(params![name, slug, RELINK_LIMIT as i64], |row| {

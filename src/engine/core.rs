@@ -631,7 +631,8 @@ impl Engine {
         if let Some(rules) = rules {
             let file_key = keys::file(id, rel);
             if unit.nodes.iter().any(|node| node.key == file_key) {
-                unit.nodes.extend(rules.file_parties(rel));
+                // Owners are referenced by key only: the ownership definitions unit asserts them.
+                // Re-asserting them here would make popular people cost O(files) per update.
                 unit.edges.extend(rules.file_edges(&file_key, rel));
             }
         }
