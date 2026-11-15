@@ -105,7 +105,8 @@ pub struct ApplyOutcome {
 }
 
 impl ApplyOutcome {
-    fn absorb(&mut self, other: ApplyOutcome) {
+    /// Folds a later outcome into this one.
+    pub fn absorb(&mut self, other: ApplyOutcome) {
         self.delta.extend(other.delta);
         self.changed |= other.changed;
         self.chunks_upserted.extend(other.chunks_upserted);
@@ -256,6 +257,13 @@ pub struct StoreStats {
     pub db_bytes: u64,
 }
 
+/// Deterministic dump of the materialised graph: nodes by primary key as `(kind, name, trust)`
+/// and edges as `(from key, kind, to key, trust)`.
+pub type Snapshot = (
+    BTreeMap<String, (String, String, String)>,
+    BTreeSet<(String, String, String, String)>,
+);
+
 /// The graph store. Cheap to clone.
 #[derive(Clone, Debug)]
 pub struct GraphStore {
@@ -342,17 +350,15 @@ fn read_graph_edge(tx: &Connection, id: i64) -> Result<Option<GraphEdge>> {
 
 impl Touched {
     fn node(&mut self, tx: &Connection, id: i64) -> Result<()> {
-        if !self.nodes.contains_key(&id) {
-            let before = read_graph_node(tx, id)?;
-            self.nodes.insert(id, before);
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.nodes.entry(id) {
+            slot.insert(read_graph_node(tx, id)?);
         }
         Ok(())
     }
 
     fn edge(&mut self, tx: &Connection, id: i64) -> Result<()> {
-        if !self.edges.contains_key(&id) {
-            let before = read_graph_edge(tx, id)?;
-            self.edges.insert(id, before);
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.edges.entry(id) {
+            slot.insert(read_graph_edge(tx, id)?);
         }
         Ok(())
     }
@@ -1571,7 +1577,7 @@ impl GraphStore {
         };
         self.db.read(|conn| {
             let mut hits: Vec<NodeHit> = Vec::new();
-            let mut push = |node: i64, score: f32, hits: &mut Vec<NodeHit>| {
+            let push = |node: i64, score: f32, hits: &mut Vec<NodeHit>| {
                 if !hits.iter().any(|hit| hit.node.0 == node) {
                     hits.push(NodeHit { node: NodeId(node), score });
                 }
@@ -1717,12 +1723,7 @@ impl GraphStore {
 
     /// A deterministic dump of the materialised graph keyed by natural keys, for tests:
     /// `(nodes: key -> (kind, name, trust), edges: (from key, kind, to key, trust))`.
-    pub fn snapshot(
-        &self,
-    ) -> Result<(
-        BTreeMap<String, (String, String, String)>,
-        BTreeSet<(String, String, String, String)>,
-    )> {
+    pub fn snapshot(&self) -> Result<Snapshot> {
         self.db.read(|conn| {
             let mut nodes = BTreeMap::new();
             let mut statement = conn.prepare("SELECT key, kind, name, trust FROM nodes")?;

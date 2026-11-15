@@ -138,11 +138,6 @@ impl CostModel {
         }
     }
 
-    /// The smaller of the two multipliers (a lower bound for any element).
-    pub(super) fn min_multiplier(&self) -> f32 {
-        self.source_of_truth.min(self.reference_only)
-    }
-
     /// Step cost = base cost × edge multiplier × multiplier of the node entered ÷ edge weight.
     pub(super) fn step_cost(
         &self,
@@ -204,7 +199,6 @@ mod tests {
         assert_eq!(model.multiplier(TrustLevel::SourceOfTruth), 1.0);
         assert_eq!(model.multiplier(TrustLevel::ReferenceOnly), 8.0);
         assert!(!model.strict);
-        assert_eq!(model.min_multiplier(), 1.0);
         // base 2 × edge 8 × node 1 ÷ weight 0.5
         let step = model.step_cost(
             2.0,
