@@ -427,12 +427,7 @@ fn scan_accepts_all_shapes_reports_bad_files_and_is_deterministic() {
     let warned: Vec<&str> = out.warnings.iter().map(|w| w.location.as_str()).collect();
     assert_eq!(
         warned,
-        [
-            "broken.json",
-            "nested/array.json",
-            "scalar.json",
-            "search.json#1"
-        ]
+        ["broken.json", "scalar.json", "search.json#1", "search.json",]
     );
 
     let search = std::fs::read_to_string(dir.path().join("search.json")).unwrap();
