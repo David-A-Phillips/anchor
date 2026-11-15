@@ -90,8 +90,8 @@ enum Command {
     Backlog,
     /// Export a GitHub repository's issues, discussions and pull-request reviews (needs `gh`).
     Fetch {
-        /// `owner/name` of the repository.
-        repository: String,
+        /// `owner/name` of the repository; omit to refresh every `[[github]]` entry.
+        repository: Option<String>,
         /// Output directory (default: <data dir>/github/<owner>-<name>).
         #[arg(long)]
         out: Option<PathBuf>,
@@ -430,9 +430,53 @@ async fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 None
             };
+            // Keep configured GitHub boards exported; changed files are picked up by re-scanning
+            // the sources that read them.
+            let mut refreshers = Vec::new();
+            for entry in engine
+                .config()
+                .github
+                .iter()
+                .filter(|entry| entry.interval_minutes > 0)
+            {
+                let options = fetch::FetchOptions::from_config(entry, engine.paths());
+                let period = Duration::from_secs(entry.interval_minutes.max(5) * 60);
+                let engine = engine.clone();
+                refreshers.push(tokio::spawn(async move {
+                    let mut timer = tokio::time::interval(period);
+                    loop {
+                        timer.tick().await;
+                        let (options, engine) = (options.clone(), engine.clone());
+                        let repository = options.repository.clone();
+                        let outcome =
+                            tokio::task::spawn_blocking(move || -> Result<fetch::FetchReport> {
+                                let report = fetch::fetch_github(&options)?;
+                                if report.issues + report.discussions + report.pulls > 0 {
+                                    for source in &engine.config().sources {
+                                        if std::path::Path::new(&source.location)
+                                            .starts_with(&options.out)
+                                        {
+                                            engine.scan_source(&source.id)?;
+                                        }
+                                    }
+                                }
+                                Ok(report)
+                            })
+                            .await;
+                        match outcome {
+                            Ok(Ok(report)) => tracing::info!("refreshed {repository}: {report:?}"),
+                            Ok(Err(err)) => tracing::warn!("refreshing {repository} failed: {err}"),
+                            Err(err) => tracing::warn!("refresh task failed: {err}"),
+                        }
+                    }
+                }));
+            }
             println!("Anchor is running. Press Ctrl-C to stop.");
             tokio::signal::ctrl_c().await?;
             embedding.abort();
+            for refresher in refreshers {
+                refresher.abort();
+            }
             if let Some(web) = web {
                 web.abort();
             }
@@ -630,6 +674,27 @@ async fn dispatch(cli: Cli) -> Result<()> {
             pulls,
         } => {
             let (config, _) = load_config(&cli.config)?;
+            let Some(repository) = repository else {
+                if config.github.is_empty() {
+                    return Err(Error::invalid(
+                        "name a repository (owner/name) or add [[github]] entries to the configuration",
+                    ));
+                }
+                for entry in &config.github {
+                    let options = fetch::FetchOptions::from_config(entry, &config.paths());
+                    let report = tokio::task::spawn_blocking(move || fetch::fetch_github(&options))
+                        .await??;
+                    println!(
+                        "{}: {} issues, {} discussions, {} pull requests new or updated ({} unchanged).",
+                        entry.repository,
+                        report.issues,
+                        report.discussions,
+                        report.pulls,
+                        report.skipped
+                    );
+                }
+                return Ok(());
+            };
             let out = out.unwrap_or_else(|| {
                 config
                     .paths()
@@ -647,7 +712,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let report =
                 tokio::task::spawn_blocking(move || fetch::fetch_github(&options)).await??;
             println!(
-                "Exported {} issues, {} discussions and {} pull requests from {repository} ({} already present) into {}.",
+                "Exported {} issues, {} discussions and {} pull requests from {repository} ({} unchanged) into {}.",
                 report.issues,
                 report.discussions,
                 report.pulls,
@@ -666,6 +731,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     out.join(dir).display()
                 );
             }
+            println!(
+                "To keep it refreshed by the daemon, also add:\n\n[[github]]\nrepository = \"{repository}\"\ninterval_minutes = 60"
+            );
         }
         Command::Ollama { action } => {
             let (mut config, path) = load_config(&cli.config)?;

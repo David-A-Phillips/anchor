@@ -2,8 +2,8 @@
 //! reviews into the JSON layouts the `issues` and `code_review` ingesters read.
 //!
 //! Uses the GitHub CLI (`gh`), so authentication, enterprise hosts and rate limits follow the
-//! user's existing `gh` setup and no token passes through Anchor. Already exported items are
-//! skipped, so a fetch can be interrupted and resumed.
+//! user's existing `gh` setup and no token passes through Anchor. Items already exported and not
+//! updated upstream since are skipped; changed items are downloaded again.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,7 +36,7 @@ pub struct FetchReport {
     pub discussions: usize,
     /// New pull-request files.
     pub pulls: usize,
-    /// Items that were already on disk.
+    /// Items already on disk and unchanged upstream.
     pub skipped: usize,
 }
 
@@ -90,8 +90,22 @@ fn save(dir: &Path, number: u64, document: &Value) -> Result<()> {
     Ok(())
 }
 
-fn exists(dir: &Path, number: u64) -> bool {
-    dir.join(format!("{number}.json")).exists()
+/// `true` when the item is already exported and has not been updated upstream since.
+fn fresh(dir: &Path, number: u64, updated: Option<&str>) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{number}.json"))) else {
+        return false;
+    };
+    let Ok(document) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let stored = [
+        "/issue/updated_at",
+        "/discussion/updatedAt",
+        "/pull_request/updated_at",
+    ]
+    .iter()
+    .find_map(|pointer| document.pointer(pointer).and_then(Value::as_str));
+    stored.is_some() && stored == updated
 }
 
 const DISCUSSIONS: &str = "query($owner: String!, $name: String!, $count: Int!) { repository(owner: $owner, name: $name) { discussions(first: $count, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { number title body url createdAt updatedAt closed author { login } category { name } answer { id } comments(first: 50) { nodes { id body createdAt author { login } replies(first: 30) { nodes { id body createdAt author { login } } } } } } } } }";
@@ -126,7 +140,11 @@ pub fn fetch_github(options: &FetchOptions) -> Result<FetchReport> {
             let Some(number) = issue.get("number").and_then(Value::as_u64) else {
                 continue;
             };
-            if exists(&dir, number) {
+            if fresh(
+                &dir,
+                number,
+                issue.get("updated_at").and_then(Value::as_str),
+            ) {
                 report.skipped += 1;
                 continue;
             }
@@ -165,7 +183,11 @@ pub fn fetch_github(options: &FetchOptions) -> Result<FetchReport> {
                     let Some(number) = discussion.get("number").and_then(Value::as_u64) else {
                         continue;
                     };
-                    if exists(&dir, number) {
+                    if fresh(
+                        &dir,
+                        number,
+                        discussion.get("updatedAt").and_then(Value::as_str),
+                    ) {
                         report.skipped += 1;
                         continue;
                     }
@@ -190,7 +212,7 @@ pub fn fetch_github(options: &FetchOptions) -> Result<FetchReport> {
             let Some(number) = pull.get("number").and_then(Value::as_u64) else {
                 continue;
             };
-            if exists(&dir, number) {
+            if fresh(&dir, number, pull.get("updated_at").and_then(Value::as_str)) {
                 report.skipped += 1;
                 continue;
             }
@@ -237,4 +259,20 @@ pub fn fetch_github(options: &FetchOptions) -> Result<FetchReport> {
         }
     }
     Ok(report)
+}
+
+impl FetchOptions {
+    /// Options for a configured repository.
+    pub fn from_config(
+        config: &crate::config::GithubFetchConfig,
+        paths: &crate::config::AnchorPaths,
+    ) -> Self {
+        Self {
+            repository: config.repository.clone(),
+            out: config.out_dir(paths),
+            issues: config.issues,
+            discussions: config.discussions,
+            pulls: config.pulls,
+        }
+    }
 }

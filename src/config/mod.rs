@@ -189,6 +189,51 @@ impl SourceConfig {
     }
 }
 
+/// A GitHub repository whose issue board, discussion board and pull requests the daemon keeps
+/// exported (`[[github]]`). Requires the GitHub CLI (`gh`) to be installed and logged in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubFetchConfig {
+    /// `owner/name`.
+    pub repository: String,
+    /// Most recently updated issues to keep exported.
+    #[serde(default = "default_issue_count")]
+    pub issues: usize,
+    /// Most recently updated discussions to keep exported.
+    #[serde(default = "default_item_count")]
+    pub discussions: usize,
+    /// Most recently updated pull requests to keep exported.
+    #[serde(default = "default_item_count")]
+    pub pulls: usize,
+    /// Minutes between refreshes while the daemon runs; `0` fetches only on `anchor fetch`.
+    #[serde(default = "default_fetch_interval")]
+    pub interval_minutes: u64,
+    /// Export directory; defaults to `<data dir>/github/<owner>-<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out: Option<PathBuf>,
+}
+
+fn default_issue_count() -> usize {
+    100
+}
+fn default_item_count() -> usize {
+    50
+}
+fn default_fetch_interval() -> u64 {
+    60
+}
+
+impl GithubFetchConfig {
+    /// The export directory in effect.
+    pub fn out_dir(&self, paths: &AnchorPaths) -> PathBuf {
+        self.out.clone().unwrap_or_else(|| {
+            paths
+                .root()
+                .join("github")
+                .join(self.repository.replace('/', "-"))
+        })
+    }
+}
+
 /// The complete configuration (`anchor.toml`). Every section is optional and defaults sensibly.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -222,6 +267,8 @@ pub struct AnchorConfig {
     pub web: WebConfig,
     /// Configured sources (`[[sources]]`).
     pub sources: Vec<SourceConfig>,
+    /// GitHub repositories kept exported by the daemon (`[[github]]`).
+    pub github: Vec<GithubFetchConfig>,
 }
 
 impl AnchorConfig {

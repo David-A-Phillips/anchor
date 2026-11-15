@@ -186,12 +186,25 @@ request reviews) into `./corpus` for scale testing.
 `anchor fetch owner/repo` exports the most recently updated issues, discussions and pull requests
 of a GitHub repository (with their comment and review threads) and prints the `[[sources]]`
 entries to add. It uses the GitHub CLI, so run `gh auth login` first; nothing is fetched unless
-you run the command, and already exported items are skipped on a re-run.
+you run the command or configure a `[[github]]` entry.
 
 ```sh
 anchor fetch grafana/grafana --issues 100 --discussions 50 --pulls 50
 anchor ingest
 anchor query "What is the status of grafana#105210?"
+```
+
+Re-running `anchor fetch owner/repo` downloads only items that are new or changed upstream. To
+have the daemon keep a board current, add it to the configuration; `anchor fetch` with no
+repository refreshes every entry.
+
+```toml
+[[github]]
+repository = "grafana/grafana"
+issues = 100
+discussions = 50
+pulls = 50
+interval_minutes = 60          # 0: only on `anchor fetch`
 ```
 
 Refer to an item as `repo#123` in a question. For `issues` sources, `map` depth ingests titles,
