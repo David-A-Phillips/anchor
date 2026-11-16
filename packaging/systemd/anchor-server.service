@@ -1,0 +1,51 @@
+# Anchor team sync server (system service). Not enabled automatically.
+#
+#   sudoedit /etc/anchor/anchor.toml             # review the listen address
+#   echo 'ANCHOR_SYNC_TOKEN=...' | sudo tee /etc/anchor/server.env && sudo chmod 640 /etc/anchor/server.env
+#   sudo systemctl enable --now anchor-server.service
+#
+# The server speaks plain WebSocket/gRPC: put a TLS-terminating reverse proxy in front of it.
+[Unit]
+Description=Anchor team sync server
+Documentation=man:anchor(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=anchor
+Group=anchor
+Environment=ANCHOR_HOME=/var/lib/anchor
+Environment=ANCHOR_CONFIG=/etc/anchor/anchor.toml
+# Holds ANCHOR_SYNC_TOKEN=... (optional file, readable by group anchor).
+EnvironmentFile=-/etc/anchor/server.env
+ExecStart=/usr/bin/anchor server
+Restart=on-failure
+RestartSec=5
+StateDirectory=anchor
+StateDirectoryMode=0750
+ConfigurationDirectory=anchor
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
