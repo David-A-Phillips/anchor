@@ -6,7 +6,7 @@ mod daemon;
 pub mod eval;
 pub mod fetch;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -305,16 +305,14 @@ enum McpAction {
     Uninstall(crate::mcp::install::UninstallArgs),
 }
 
-fn run_mcp_action(action: McpAction, config: &Option<PathBuf>) -> Result<()> {
+fn run_mcp_action(action: McpAction, config: Option<&Path>) -> Result<()> {
     use crate::mcp::install;
     let locations = install::Locations::system()?;
     let lines = match action {
         McpAction::Install(args) => {
             let exe = std::env::current_exe()
                 .map_err(|err| Error::config(format!("cannot locate this executable: {err}")))?;
-            let config = config
-                .as_ref()
-                .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()));
+            let config = config.map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
             install::install(
                 &args,
                 &exe,
@@ -333,8 +331,8 @@ fn run_mcp_action(action: McpAction, config: &Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn load_config(path: &Option<PathBuf>) -> Result<(AnchorConfig, PathBuf)> {
-    let path = path.clone().unwrap_or_else(default_config_path);
+fn load_config(path: Option<&Path>) -> Result<(AnchorConfig, PathBuf)> {
+    let path = path.map_or_else(default_config_path, Path::to_path_buf);
     Ok((AnchorConfig::load_or_default(&path)?, path))
 }
 
@@ -488,7 +486,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Ingest { source } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             install_remote(&engine)?;
             let scan = engine.clone();
@@ -523,7 +521,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             retrieval_only,
             explain,
         } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             install_remote(&engine)?;
             let mut request = QueryRequest::new(text);
@@ -563,7 +561,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             engine.flush()?;
         }
         Command::Daemon { no_web } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             let scan = engine.clone();
             let reports = tokio::task::spawn_blocking(move || scan.scan_all()).await??;
@@ -610,7 +608,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             engine.flush()?;
         }
         Command::Status => {
-            let (config, path) = load_config(&cli.config)?;
+            let (config, path) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             let stats = engine.store().stats()?;
             println!("config   {}", path.display());
@@ -638,7 +636,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Spend { days } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             let summary = engine
                 .ledger()
@@ -655,7 +653,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             );
         }
         Command::Backlog => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             for item in engine.backlog().list(&Default::default())? {
                 println!(
@@ -669,7 +667,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Export { output } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             let exported = tokio::task::spawn_blocking(move || engine.export_pack(None)).await??;
             let path = match output {
@@ -686,16 +684,16 @@ async fn dispatch(cli: Cli) -> Result<()> {
             );
         }
         Command::Import { file } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             let applied = tokio::task::spawn_blocking(move || engine.import_pack(&file)).await??;
             println!("Applied {applied} unit versions.");
         }
         Command::Mcp {
             action: Some(action),
-        } => run_mcp_action(action, &cli.config)?,
+        } => run_mcp_action(action, cli.config.as_deref())?,
         Command::Mcp { action: None } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             install_remote(&engine)?;
             let server = crate::mcp::McpServer::new(engine.clone(), query_engine(&engine));
@@ -703,7 +701,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             engine.flush()?;
         }
         Command::Server => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let listen = config.sync.listen.clone();
             let token = token_from_env(config.sync.auth_token_env.as_deref(), |name| {
                 std::env::var(name).ok()
@@ -725,7 +723,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             .await?;
         }
         Command::Sync => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let token = token_from_env(config.sync.auth_token_env.as_deref(), |name| {
                 std::env::var(name).ok()
             });
@@ -780,7 +778,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             );
         }
         Command::Deepen { source, depth } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             install_remote(&engine)?;
             let scan = engine.clone();
@@ -807,7 +805,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             discussions,
             pulls,
         } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let Some(repository) = repository else {
                 if config.github.is_empty() {
                     return Err(Error::invalid(
@@ -870,7 +868,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             );
         }
         Command::FetchAtlassian(args) => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             atlassian::run_command(&config, args).await?;
         }
         Command::Eval {
@@ -879,7 +877,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             retrieval_only,
             json,
         } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let truth: crate::synth::GroundTruth =
                 serde_json::from_str(&std::fs::read_to_string(&truth)?)?;
             let engine = open_engine(config).await?;
@@ -900,7 +898,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             engine.flush()?;
         }
         Command::Why { target, json } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             let asked = engine.clone();
             let report = tokio::task::spawn_blocking(move || asked.why(&target)).await??;
@@ -918,7 +916,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             json,
         } => {
             if let Some(truth) = truth {
-                let (config, _) = load_config(&cli.config)?;
+                let (config, _) = load_config(cli.config.as_deref())?;
                 let truth: crate::synth::GroundTruth =
                     serde_json::from_str(&std::fs::read_to_string(&truth)?)?;
                 let engine = open_engine(config).await?;
@@ -951,7 +949,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Enrich { limit } => {
-            let (config, _) = load_config(&cli.config)?;
+            let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             if engine
                 .router()
@@ -971,7 +969,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             engine.flush()?;
         }
         Command::Ollama { action } => {
-            let (mut config, path) = load_config(&cli.config)?;
+            let (mut config, path) = load_config(cli.config.as_deref())?;
             let manager = OllamaManager::new(config.ollama.clone(), &config.paths());
             match action {
                 OllamaAction::Status => println!("{:#?}", manager.status().await),
@@ -1022,3 +1020,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
