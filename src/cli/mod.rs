@@ -253,6 +253,21 @@ enum OllamaAction {
 
 /// Entry point of the `anchor` binary.
 pub fn run() -> ExitCode {
+    // Output piped into a reader that stops early (`anchor ... | head`) is not an error: exit
+    // quietly instead of panicking on the closed pipe.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if message.contains("failed printing to stdout") && message.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
     let cli = Cli::parse();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
