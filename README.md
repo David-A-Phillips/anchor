@@ -34,15 +34,22 @@ question types; see [docs/benchmarks.md](docs/benchmarks.md) for method, data an
 
 ## Install
 
-Packages for apt, dnf and Homebrew, an install script, a Docker image and building from source
-are described in [docs/install.md](docs/install.md). From source:
-
 ```sh
-cargo build --release          # binary at target/release/anchor; needs Rust 1.88+ and a C compiler
+sudo apt-get install anchor-context      # Debian, Ubuntu (after adding the apt repository)
+sudo dnf install anchor-context          # Fedora, RHEL family (after adding the repository)
+brew install OWNER/tap/anchor            # macOS, Linux
+curl -fsSL https://raw.githubusercontent.com/OWNER/anchor/main/scripts/install.sh | sh
+cargo build --release                    # from source: Rust 1.88+ and a C compiler
 ```
 
-Linux x86_64 is the platform that has been built and tested. macOS and Windows builds are
-defined in the release workflow but have not run yet.
+The package is called `anchor-context` (other distributions' `anchor` packages are unrelated);
+the command is `anchor`. [docs/install.md](docs/install.md) has the repository setup for apt and
+dnf, upgrade and removal, running as a systemd or Homebrew service, Docker, and Windows.
+
+No release has been published yet, so the package commands above do not work until one is:
+`OWNER` is a placeholder for the repository, and [RELEASING.md](RELEASING.md) lists what a
+release needs. The `.deb`, `.rpm` and Homebrew formula have been built and installed in local
+containers on Linux x86_64; macOS, Windows and arm64 have not been built.
 
 ## Run it locally
 
@@ -295,7 +302,8 @@ current limits (no per-user access control) are in [docs/hosting.md](docs/hostin
 
 | Page | Contents |
 |---|---|
-| [docs/install.md](docs/install.md) | Packages, install script, Docker, running as a service |
+| [docs/install.md](docs/install.md) | apt, dnf, Homebrew, install script, Docker, Windows, running as a service |
+| [RELEASING.md](RELEASING.md) | Cutting a release: packages, repositories, required secrets |
 | [docs/data-sources.md](docs/data-sources.md) | Source kinds and formats, GitHub fetch, depth levels, database size |
 | [docs/atlassian.md](docs/atlassian.md) | Confluence and Jira connector |
 | [docs/models.md](docs/models.md) | Model tiers, providers, cost controls, managing Ollama |
