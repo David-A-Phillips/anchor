@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 use super::file::is_env_name;
-use super::{AnchorConfig, Mode};
+use super::{AnchorConfig, AtlassianDeployment, Mode};
 use crate::engine::embed::EmbeddingBackend;
 use crate::engine::router::{ProviderKind, TierConfig};
 use crate::sync::SyncTransport;
@@ -200,6 +200,7 @@ impl AnchorConfig {
         self.validate_ollama(&mut report);
         self.validate_network(&mut report);
         self.validate_tuning(&mut report);
+        self.validate_atlassian(&mut report);
         if let Some(dir) = &self.data_dir
             && dir.as_os_str().is_empty()
         {
@@ -245,6 +246,83 @@ impl AnchorConfig {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    fn validate_atlassian(&self, report: &mut ValidationReport) {
+        let mut outs = BTreeSet::new();
+        for (index, entry) in self.atlassian.iter().enumerate() {
+            let path = format!("atlassian[{index}]");
+            let url = entry.base_url.trim();
+            if !is_http_url(url) {
+                report.error(
+                    format!("{path}.base_url"),
+                    "must be an http(s) URL such as https://acme.atlassian.net",
+                );
+            } else if url.starts_with("http://") && !is_loopback_url(url) {
+                report.error(
+                    format!("{path}.base_url"),
+                    "must use https: the credentials would travel unencrypted",
+                );
+            }
+            check_env_name(report, &format!("{path}.token_env"), &entry.token_env);
+            match (entry.deployment, entry.email_env.as_deref()) {
+                (AtlassianDeployment::Cloud, None) => report.error(
+                    format!("{path}.email_env"),
+                    "Cloud uses e-mail + API token: name the variable holding the e-mail",
+                ),
+                (AtlassianDeployment::Cloud, Some(name)) => {
+                    check_env_name(report, &format!("{path}.email_env"), name);
+                }
+                (AtlassianDeployment::DataCenter, Some(_)) => report.warning(
+                    format!("{path}.email_env"),
+                    "ignored: Data Center authenticates with the personal access token alone",
+                ),
+                (AtlassianDeployment::DataCenter, None) => {}
+            }
+            let jql = entry.jira_jql.as_deref().map(str::trim);
+            if entry.confluence_spaces.is_empty()
+                && entry.jira_projects.is_empty()
+                && jql.is_none_or(str::is_empty)
+            {
+                report.error(
+                    path.clone(),
+                    "nothing to export: set confluence_spaces, jira_projects and/or jira_jql",
+                );
+            }
+            if jql.is_some_and(str::is_empty) {
+                report.error(format!("{path}.jira_jql"), "must not be empty when set");
+            }
+            for key in &entry.confluence_spaces {
+                let valid = key == "*"
+                    || (!key.is_empty()
+                        && key.chars().all(|c| {
+                            c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '.' | '-')
+                        }));
+                if !valid {
+                    report.error(
+                        format!("{path}.confluence_spaces"),
+                        format!("`{key}` is not a space key (letters, digits, `_ ~ . -`) or `*`"),
+                    );
+                }
+            }
+            for key in &entry.jira_projects {
+                let mut chars = key.chars();
+                let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid {
+                    report.error(
+                        format!("{path}.jira_projects"),
+                        format!("`{key}` is not a Jira project key"),
+                    );
+                }
+            }
+            if !outs.insert(entry.out_dir(&self.paths())) {
+                report.error(
+                    format!("{path}.out"),
+                    "two [[atlassian]] entries export into the same directory; set `out`",
+                );
             }
         }
     }
@@ -474,6 +552,64 @@ mod tests {
         assert!(report.is_ok(), "{:?}", report.errors);
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
         assert!(report.into_result().is_ok());
+    }
+
+    #[test]
+    fn atlassian_rules() {
+        use crate::config::{AtlassianConfig, AtlassianDeployment};
+        let good = AtlassianConfig {
+            base_url: "https://acme.atlassian.net".into(),
+            deployment: AtlassianDeployment::Cloud,
+            email_env: Some("ATL_EMAIL".into()),
+            token_env: "ATL_TOKEN".into(),
+            confluence_spaces: vec!["ENG".into(), "*".into()],
+            jira_projects: vec!["PAY".into()],
+            jira_jql: None,
+            out: None,
+            interval_minutes: 60,
+            include_restricted: false,
+            max_pages: 0,
+            max_issues: 0,
+        };
+        let check = |entry: AtlassianConfig| {
+            AnchorConfig {
+                atlassian: vec![entry],
+                ..AnchorConfig::default()
+            }
+            .validate()
+        };
+        assert!(check(good.clone()).is_ok());
+
+        let report = check(AtlassianConfig {
+            base_url: "http://acme.example".into(),
+            email_env: None,
+            token_env: "not an env name=abc123".into(),
+            confluence_spaces: vec!["bad key!".into()],
+            jira_projects: vec!["1x".into()],
+            ..good.clone()
+        });
+        for path in [
+            "atlassian[0].base_url",
+            "atlassian[0].email_env",
+            "atlassian[0].token_env",
+            "atlassian[0].confluence_spaces",
+            "atlassian[0].jira_projects",
+        ] {
+            assert!(has(&report.errors, path), "{path}: {:?}", report.errors);
+        }
+        let report = check(AtlassianConfig {
+            confluence_spaces: vec![],
+            jira_projects: vec![],
+            ..good.clone()
+        });
+        assert!(has(&report.errors, "atlassian[0]"), "nothing to export");
+        let data_center = check(AtlassianConfig {
+            deployment: AtlassianDeployment::DataCenter,
+            base_url: "http://localhost:8090".into(),
+            ..good
+        });
+        assert!(data_center.is_ok(), "{:?}", data_center.errors);
+        assert!(has(&data_center.warnings, "atlassian[0].email_env"));
     }
 
     #[test]
