@@ -236,6 +236,93 @@ impl GithubFetchConfig {
     }
 }
 
+/// Which flavour of Atlassian a [`AtlassianConfig`] talks to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum AtlassianDeployment {
+    /// Atlassian Cloud (`*.atlassian.net`): basic auth with e-mail and API token; Confluence under
+    /// `/wiki`, Jira REST v3.
+    #[default]
+    Cloud,
+    /// Data Center / Server: personal access token as bearer token; Confluence and Jira REST
+    /// without the `/wiki` prefix, Jira REST v2.
+    #[value(name = "data_center")]
+    DataCenter,
+}
+
+/// A Confluence and Jira site whose pages and issues the daemon keeps exported (`[[atlassian]]`).
+///
+/// Credentials are never stored here: `email_env` and `token_env` name environment variables.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtlassianConfig {
+    /// Site URL, e.g. `https://acme.atlassian.net` or `https://wiki.example.com` (include a
+    /// context path such as `/confluence` for Data Center when there is one).
+    pub base_url: String,
+    /// `cloud` or `data_center`.
+    #[serde(default)]
+    pub deployment: AtlassianDeployment,
+    /// Cloud only: name of the environment variable holding the account e-mail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_env: Option<String>,
+    /// Name of the environment variable holding the API token (Cloud) or personal access token
+    /// (Data Center).
+    pub token_env: String,
+    /// Confluence space keys to export; `"*"` means every global space the token can see.
+    #[serde(default)]
+    pub confluence_spaces: Vec<String>,
+    /// Jira project keys to export.
+    #[serde(default)]
+    pub jira_projects: Vec<String>,
+    /// Extra JQL. Alone it selects the issues; together with `jira_projects` it narrows each
+    /// project (`project = KEY AND (jql)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jira_jql: Option<String>,
+    /// Export directory; defaults to `<data dir>/atlassian/<host>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out: Option<PathBuf>,
+    /// Minutes between refreshes while the daemon runs; `0` fetches only on demand.
+    #[serde(default = "default_fetch_interval")]
+    pub interval_minutes: u64,
+    /// Export pages that have read restrictions (recorded as `restricted_to`). Off by default:
+    /// restricted content would otherwise leak through shared packs and sync.
+    #[serde(default)]
+    pub include_restricted: bool,
+    /// Most pages downloaded per run; `0` is unlimited. The next run continues where this stopped.
+    #[serde(default)]
+    pub max_pages: usize,
+    /// Most issues downloaded per run; `0` is unlimited.
+    #[serde(default)]
+    pub max_issues: usize,
+}
+
+impl AtlassianConfig {
+    /// The export directory in effect.
+    pub fn out_dir(&self, paths: &AnchorPaths) -> PathBuf {
+        self.out
+            .clone()
+            .unwrap_or_else(|| paths.root().join("atlassian").join(self.host_slug()))
+    }
+
+    /// A file-name-safe rendering of the site (`acme.atlassian.net`, `wiki.example.com-8090`).
+    pub fn host_slug(&self) -> String {
+        let rest = self
+            .base_url
+            .split_once("://")
+            .map_or(self.base_url.as_str(), |(_, rest)| rest);
+        let rest = rest.rsplit('@').next().unwrap_or(rest);
+        rest.trim_matches('/')
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+}
+
 /// The complete configuration (`anchor.toml`). Every section is optional and defaults sensibly.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -271,6 +358,8 @@ pub struct AnchorConfig {
     pub sources: Vec<SourceConfig>,
     /// GitHub repositories kept exported by the daemon (`[[github]]`).
     pub github: Vec<GithubFetchConfig>,
+    /// Confluence and Jira sites kept exported by the daemon (`[[atlassian]]`).
+    pub atlassian: Vec<AtlassianConfig>,
 }
 
 impl AnchorConfig {

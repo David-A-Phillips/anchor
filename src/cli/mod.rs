@@ -1,5 +1,6 @@
 //! Command-line interface (`anchor <command>`).
 
+pub mod atlassian;
 pub mod compare;
 pub mod eval;
 pub mod fetch;
@@ -149,6 +150,8 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         pulls: usize,
     },
+    /// Export live Confluence pages and Jira issues (see docs/atlassian.md).
+    FetchAtlassian(atlassian::FetchAtlassianArgs),
     /// Ingest a source more deeply (zoom in): phone_book -> map -> full.
     Deepen {
         /// Source id.
@@ -578,6 +581,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     }
                 }));
             }
+            refreshers.extend(atlassian::spawn_refreshers(&engine));
             println!("Anchor is running. Press Ctrl-C to stop.");
             tokio::signal::ctrl_c().await?;
             embedding.abort();
@@ -846,6 +850,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!(
                 "To keep it refreshed by the daemon, also add:\n\n[[github]]\nrepository = \"{repository}\"\ninterval_minutes = 60"
             );
+        }
+        Command::FetchAtlassian(args) => {
+            let (config, _) = load_config(&cli.config)?;
+            atlassian::run_command(&config, args).await?;
         }
         Command::Eval {
             truth,
