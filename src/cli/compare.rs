@@ -398,33 +398,82 @@ pub struct Score {
     pub stale_generated_questions: usize,
     /// Of those: the generated answer names a correct owner and does not lead with the stale one.
     pub stale_generated_safe: Option<f64>,
+    /// Hit rate (LlamaIndex `hit_rate`): questions with at least one relevant context. A
+    /// context is relevant when it contains an expected answer.
+    pub hit_rate: f64,
+    /// Mean reciprocal rank of the first relevant context (LlamaIndex `mrr`).
+    pub mrr: f64,
+    /// Relevant contexts / retrieved contexts (LlamaIndex `precision`).
+    pub precision: f64,
+    /// Normalised discounted cumulative gain with binary relevance (LlamaIndex `ndcg`).
+    pub ndcg: f64,
+    /// Ragas context precision without an LLM: mean of precision@k over the relevant ranks.
+    pub context_precision: f64,
     /// Mean context size in approximate tokens, after the budget cut.
     pub context_tokens: f64,
     /// Mean retrieval latency in milliseconds.
     pub latency_ms: f64,
 }
 
-fn budgeted(contexts: &[String]) -> (String, usize) {
+/// The contexts the scorer reads, each normalised: as many as fit the shared budget.
+fn budgeted_list(contexts: &[String]) -> (Vec<String>, usize) {
     let budget = CONTEXT_TOKENS * 4;
-    let mut text = String::new();
+    let (mut kept, mut size) = (Vec::new(), 0);
     for context in contexts.iter().take(MAX_CONTEXTS) {
-        if text.is_empty() && context.len() > budget {
+        if kept.is_empty() && context.len() > budget {
             // One oversized context (some systems return a single blob): keep its head.
             let mut cut = budget;
             while !context.is_char_boundary(cut) {
                 cut -= 1;
             }
-            text.push_str(&context[..cut]);
+            kept.push(normalize(&context[..cut]));
+            size = cut;
             break;
         }
-        if text.len() + context.len() > budget {
+        if size + context.len() > budget {
             break;
         }
-        text.push_str(context);
-        text.push_str("\n\n");
+        kept.push(normalize(context));
+        size += context.len() + 2;
     }
-    let tokens = text.len() / 4;
-    (normalize(&text), tokens)
+    (kept, size / 4)
+}
+
+/// Rank metrics over the retrieved contexts, with binary relevance: a context is relevant when
+/// it contains an expected answer. Returns (hit rate, MRR, precision, nDCG, context precision).
+fn rank_metrics(question: &Question, contexts: &[String]) -> (f64, f64, f64, f64, f64) {
+    let relevant: Vec<bool> = contexts
+        .iter()
+        .map(|context| question.expected.iter().any(|g| find(context, g).is_some()))
+        .collect();
+    let count = relevant.iter().filter(|r| **r).count();
+    if count == 0 {
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+    let first = relevant.iter().position(|r| *r).unwrap_or(0);
+    let discount = |rank: usize| 1.0 / ((rank + 2) as f64).log2();
+    let dcg: f64 = relevant
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| **r)
+        .map(|(rank, _)| discount(rank))
+        .sum();
+    let ideal: f64 = (0..count).map(discount).sum();
+    let mut seen = 0;
+    let mut precision_sum = 0.0;
+    for (rank, is_relevant) in relevant.iter().enumerate() {
+        if *is_relevant {
+            seen += 1;
+            precision_sum += seen as f64 / (rank + 1) as f64;
+        }
+    }
+    (
+        1.0,
+        1.0 / (first + 1) as f64,
+        count as f64 / relevant.len() as f64,
+        dcg / ideal,
+        precision_sum / count as f64,
+    )
 }
 
 fn share(question: &Question, text: &str, loose: bool) -> f64 {
@@ -468,8 +517,10 @@ pub fn score(
     let mut sums: BTreeMap<String, (Score, f64, f64, f64, f64)> = BTreeMap::new();
     for question in questions {
         let result = by_id.get(question.id.as_str()).copied().unwrap_or(&empty);
-        let (context, tokens) = budgeted(&result.contexts);
+        let (contexts, tokens) = budgeted_list(&result.contexts);
+        let context = contexts.concat();
         let recall = share(question, &context, false);
+        let (hit, mrr, precision, ndcg, context_precision) = rank_metrics(question, &contexts);
         let answer = result.answer.as_deref().map(normalize).unwrap_or_default();
         let generated = result.generated_answer.as_deref().map(normalize);
         let mut names = vec![question.category.clone(), "all".to_owned()];
@@ -484,6 +535,11 @@ pub fn score(
             score.context_complete += f64::from(recall >= 1.0);
             score.context_tokens += tokens as f64;
             score.latency_ms += result.latency_ms;
+            score.hit_rate += hit;
+            score.mrr += mrr;
+            score.precision += precision;
+            score.ndcg += ndcg;
+            score.context_precision += context_precision;
             *answer_sum += share(question, &answer, true);
             if let Some(generated) = &generated {
                 score.generated_questions += 1;
@@ -507,6 +563,11 @@ pub fn score(
                 score.context_recall /= n;
                 score.context_complete /= n;
                 score.context_tokens /= n;
+                score.hit_rate /= n;
+                score.mrr /= n;
+                score.precision /= n;
+                score.ndcg /= n;
+                score.context_precision /= n;
                 score.latency_ms /= n;
                 score.answer_recall = any_answer.then_some(answer / n);
                 score.generated_recall = (score.generated_questions > 0)
@@ -727,6 +788,23 @@ pub fn render(board: &[(String, BTreeMap<String, Score>)]) -> String {
             ));
         }
     }
+    out.push_str(&format!(
+        "\nranking metrics as other projects define them (all questions)\n{:<22} {:>9} {:>7} {:>10} {:>7} {:>14}\n",
+        "system", "hit-rate", "MRR", "precision", "nDCG", "ctx-precision"
+    ));
+    for (name, scores) in board {
+        if let Some(score) = scores.get("all") {
+            out.push_str(&format!(
+                "{:<22} {:>9.2} {:>7.2} {:>10.2} {:>7.2} {:>14.2}\n",
+                name,
+                score.hit_rate,
+                score.mrr,
+                score.precision,
+                score.ndcg,
+                score.context_precision
+            ));
+        }
+    }
     if let Some(n) = board
         .iter()
         .find_map(|(_, scores)| scores.get("all").map(|s| s.stale_questions))
@@ -751,7 +829,9 @@ pub fn render(board: &[(String, BTreeMap<String, Score>)]) -> String {
         "\nctx-rec: share of expected answers found in the retrieved text. ctx-full: questions \
          with every expected answer retrieved.\nown-ans: the system's own answer (no model). \
          gen-ans: answer written from the contexts by the shared generator model.\n\
-         ctx-not-stale / gen-not-stale: the stale claim is absent or comes after the correct one.\n",
+         ctx-not-stale / gen-not-stale: the stale claim is absent or comes after the correct one.\n\
+         hit-rate, MRR, precision, nDCG: LlamaIndex's retrieval metrics; ctx-precision: Ragas' \
+         context precision (non-LLM). A context counts as relevant when it contains an expected answer.\n",
     );
     out
 }
@@ -840,6 +920,26 @@ mod tests {
         let scores = score(&[q], &[result(&[paraphrase], Some(paraphrase))], false);
         assert!(scores["all"].context_recall.abs() < 1e-9);
         assert_eq!(scores["all"].generated_recall, Some(1.0));
+    }
+
+    #[test]
+    fn rank_metrics_follow_the_published_definitions() {
+        let q = question(&[&["needle"]], &[], false);
+        // Relevant contexts at ranks 2 and 4 of 4.
+        let scores = score(
+            &[q],
+            &[result(&["hay", "a needle", "straw", "needle again"], None)],
+            false,
+        );
+        let s = &scores["all"];
+        assert!((s.hit_rate - 1.0).abs() < 1e-9);
+        assert!((s.mrr - 0.5).abs() < 1e-9);
+        assert!((s.precision - 0.5).abs() < 1e-9);
+        // Ragas: (precision@2 + precision@4) / 2 = (1/2 + 2/4) / 2.
+        assert!((s.context_precision - 0.5).abs() < 1e-9);
+        let dcg = 1.0 / 3f64.log2() + 1.0 / 5f64.log2();
+        let ideal = 1.0 + 1.0 / 3f64.log2();
+        assert!((s.ndcg - dcg / ideal).abs() < 1e-9);
     }
 
     #[test]
