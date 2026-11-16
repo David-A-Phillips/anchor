@@ -18,7 +18,7 @@ RELEASE_DIR := target/$(TARGET)/release
 DIST := target/dist
 ARCHIVE := anchor-$(VERSION)-$(TARGET)
 
-.PHONY: build assets archive package-deb package-rpm apt-repo rpm-repo dist checksums clean-dist
+.PHONY: test-apt test-rpm build assets archive package-deb package-rpm apt-repo rpm-repo dist checksums clean-dist
 
 build:
 	$(CARGO) build --release --locked --target $(TARGET)
@@ -57,3 +57,10 @@ dist: archive package-deb package-rpm checksums
 
 clean-dist:
 	rm -rf $(DIST) target/apt-repo target/rpm-repo target/assets
+
+# Install the packages in clean containers (needs Docker; builds an unsigned repo first).
+test-apt: apt-repo
+	for img in debian:bookworm-slim ubuntu:24.04; do docker run --rm -v $(CURDIR)/target/apt-repo:/repo -v $(CURDIR)/packaging/test/deb-in-container.sh:/t.sh:ro $$img /t.sh trusted || exit 1; done
+
+test-rpm:
+	docker run --rm -v $(CURDIR)/$(DIST):/in:ro -v $(CURDIR)/packaging:/pkg:ro fedora:latest /pkg/test/rpm-in-container.sh

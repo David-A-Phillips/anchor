@@ -1,0 +1,28 @@
+{
+    "version": "0.1.0",
+    "description": "Local-first context engine and sync daemon that grounds AI models in your codebases",
+    "homepage": "https://github.com/OWNER/anchor",
+    "license": "TODO(owner)",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/OWNER/anchor/releases/download/v0.1.0/anchor-0.1.0-x86_64-pc-windows-msvc.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "extract_dir": "anchor-0.1.0-x86_64-pc-windows-msvc"
+        }
+    },
+    "bin": "anchor.exe",
+    "checkver": {
+        "github": "https://github.com/OWNER/anchor"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/OWNER/anchor/releases/download/v$version/anchor-$version-x86_64-pc-windows-msvc.zip",
+                "hash": {
+                    "url": "$url.sha256"
+                },
+                "extract_dir": "anchor-$version-x86_64-pc-windows-msvc"
+            }
+        }
+    }
+}

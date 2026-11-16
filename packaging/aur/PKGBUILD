@@ -1,0 +1,54 @@
+# UNTESTED (no Arch Linux available when this was written). Maintainer: David <phillipsadavid@gmail.com>
+#
+# AUR package `anchor-context-bin`: installs the prebuilt release archives. The name avoids the
+# existing, unrelated `anchor` packages. Before submitting:
+#   1. replace OWNER and the license placeholder,
+#   2. run `updpkgsums` (fills sha256sums) and `makepkg --printsrcinfo > .SRCINFO`,
+#   3. test with `makepkg -si` in a clean chroot (`extra-x86_64-build`).
+pkgname=anchor-context-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local-first context engine and sync daemon that grounds AI models in your codebases (prebuilt binary)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/OWNER/anchor"
+license=('custom:TODO(owner)') # TODO(owner): SPDX identifier, and ship the license file below
+depends=('glibc' 'gcc-libs')
+optdepends=('git: history and blame' 'github-cli: fetch from GitHub')
+provides=('anchor')
+conflicts=('anchor')
+options=('!strip')
+_base="$url/releases/download/v$pkgver/anchor-$pkgver"
+source_x86_64=("$_base-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$_base-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SKIP') # run updpkgsums
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "$srcdir/anchor-$pkgver-$CARCH-unknown-linux-gnu"
+  install -Dm755 anchor "$pkgdir/usr/bin/anchor"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  # TODO(owner): install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  install -dm755 "$pkgdir/usr/share/bash-completion/completions" \
+    "$pkgdir/usr/share/zsh/site-functions" "$pkgdir/usr/share/fish/vendor_completions.d" \
+    "$pkgdir/usr/share/man/man1"
+  ./anchor completions bash >"$pkgdir/usr/share/bash-completion/completions/anchor"
+  ./anchor completions zsh >"$pkgdir/usr/share/zsh/site-functions/_anchor"
+  ./anchor completions fish >"$pkgdir/usr/share/fish/vendor_completions.d/anchor.fish"
+  ./anchor man >"$pkgdir/usr/share/man/man1/anchor.1"
+
+  # Per-user daemon unit (not enabled): systemctl --user enable --now anchor.service
+  install -dm755 "$pkgdir/usr/lib/systemd/user"
+  cat >"$pkgdir/usr/lib/systemd/user/anchor.service" <<'UNIT'
+[Unit]
+Description=Anchor context daemon
+ConditionPathExists=%E/anchor/anchor.toml
+
+[Service]
+ExecStart=/usr/bin/anchor daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+}

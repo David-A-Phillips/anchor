@@ -1,30 +1,66 @@
 name: Release
 
-# Push a tag such as v0.1.0 to build and publish release archives.
+# Push a tag such as v0.1.0 (it must equal the version in Cargo.toml) to build everything and
+# publish: GitHub Release, apt + dnf repositories (GitHub Pages) and the Homebrew tap.
+# Run the workflow by hand (Actions > Release > Run workflow) for a DRY RUN: it builds and
+# packages everything and uploads the results as workflow artifacts, but publishes nothing.
+#
+# Required secrets and variables are listed in RELEASING.md.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # Public base URL of the apt/dnf repositories (GitHub Pages by default). Override with the
+  # repository variable REPO_BASE_URL when serving from a custom domain.
+  REPO_BASE_URL: ${{ vars.REPO_BASE_URL || format('https://{0}.github.io/{1}', github.repository_owner, github.event.repository.name) }}
 
 jobs:
+  meta:
+    name: resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+              exit 1
+            fi
+            publish=true
+          else
+            publish=false
+            echo "Dry run: nothing will be published." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+
   build:
     name: build ${{ matrix.target }}
+    needs: meta
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux builds are glibc (gnu), not musl: the C dependencies (SQLite, ring, zstd,
-          # tree-sitter) are not verified to cross-build statically. Built on the oldest
-          # available Ubuntu so the binaries run on older distributions.
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          # Linux builds are glibc (gnu), not musl: ring, SQLite, zstd and tree-sitter compile C
+          # code and a musl toolchain is not verified. They are built on the oldest runner image
+          # (Ubuntu 22.04, glibc 2.35) so the binaries and the .deb/.rpm run on older distributions.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, linux: true }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, linux: true }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
@@ -35,14 +71,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          # cargo-auditable embeds the dependency list in the binary (readable by `cargo audit bin`).
+          tool: cargo-auditable${{ matrix.linux && ',cargo-deb,cargo-generate-rpm' || '' }}
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Package
+        run: cargo auditable build --release --locked --target ${{ matrix.target }}
+      - name: Package archive
         shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          name="anchor-${version}-${{ matrix.target }}"
+          name="anchor-${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/anchor.exe" "dist/${name}/"
@@ -68,22 +109,161 @@ jobs:
           fi
           rm -rf "${name}"
           ls -l
+      - name: Package .deb and .rpm
+        if: matrix.linux
+        run: |
+          make package-deb package-rpm TARGET=${{ matrix.target }} CARGO="cargo auditable"
+          cp target/dist/*.deb target/dist/*.rpm dist/
+          ls -l dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
 
-  publish:
-    name: publish GitHub Release
-    needs: build
+  # Build the apt and dnf repositories from the packages. Signed when the key secret exists;
+  # publishing (GitHub Pages) happens only for tag pushes, and refuses to publish unsigned.
+  repos:
+    name: build apt and dnf repositories
+    needs: [meta, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Install repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev createrepo-c gnupg
+      - name: Import signing key
+        id: key
+        shell: bash
+        env:
+          KEY: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "${KEY}" ]; then
+            echo "No REPO_GPG_PRIVATE_KEY secret: repositories will be unsigned."
+            if [ "${{ needs.meta.outputs.publish }}" = "true" ]; then
+              echo "::error::refusing to publish unsigned repositories; set REPO_GPG_PRIVATE_KEY"
+              exit 1
+            fi
+            exit 0
+          fi
+          printf '%s' "${KEY}" | gpg --batch --import
+          fpr=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          echo "GPG_KEY_ID=${fpr}" >> "$GITHUB_ENV"
+      - name: Build repositories
+        env:
+          GPG_PASSPHRASE: ${{ secrets.REPO_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          packaging/apt/build-repo.sh site/apt dist/*.deb
+          packaging/rpm/build-repo.sh site/rpm dist/*.rpm
+          base="${REPO_BASE_URL%/}"
+          cat > site/anchor.sources <<EOF
+          Types: deb
+          URIs: ${base}/apt
+          Suites: stable
+          Components: main
+          Signed-By: /etc/apt/keyrings/anchor.gpg
+          EOF
+          cat > site/anchor.repo <<EOF
+          [anchor]
+          name=Anchor
+          baseurl=${base}/rpm
+          enabled=1
+          gpgcheck=0
+          repo_gpgcheck=1
+          gpgkey=${base}/rpm/RPM-GPG-KEY-anchor
+          EOF
+          cat > site/index.html <<EOF
+          <!doctype html><meta charset="utf-8"><title>Anchor package repositories</title>
+          <h1>Anchor package repositories</h1>
+          <p>apt: <a href="apt/anchor-archive-keyring.gpg">key</a>, <a href="anchor.sources">anchor.sources</a></p>
+          <p>dnf: <a href="anchor.repo">anchor.repo</a></p>
+          <p>Instructions: docs/install.md in the repository.</p>
+          EOF
+          touch site/.nojekyll
+          find site -maxdepth 3 | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repos-dry-run
+          path: site
+          if-no-files-found: error
+      - uses: actions/upload-pages-artifact@v3
+        if: needs.meta.outputs.publish == 'true' && vars.PAGES_ENABLED == 'true'
+        with:
+          path: site
+
+  pages:
+    name: publish apt and dnf repositories (GitHub Pages)
+    needs: [meta, repos]
+    if: needs.meta.outputs.publish == 'true' && vars.PAGES_ENABLED == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  release:
+    name: GitHub Release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-*
           merge-multiple: true
           path: dist
+      - name: Checksums and signature
+        shell: bash
+        env:
+          KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          cd dist
+          # One file listing every package and archive (the per-file .sha256 files stay too).
+          : > SHA256SUMS
+          for f in *; do
+            case "$f" in *.sha256 | SHA256SUMS*) continue ;; esac
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+          if [ -n "${KEY}" ]; then
+            printf '%s' "${KEY}" | gpg --batch --import
+            fpr=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+            args=(--batch --yes --armor --detach-sign --default-key "${fpr}")
+            [ -n "${GPG_PASSPHRASE}" ] && args+=(--pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}")
+            gpg "${args[@]}" -o SHA256SUMS.asc SHA256SUMS
+          else
+            echo "No RELEASE_GPG_PRIVATE_KEY secret: SHA256SUMS is not signed."
+          fi
+      - name: Attest build provenance
+        if: needs.meta.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@v2
+        # Needs a public repository (or GitHub Enterprise); do not fail the release without it.
+        continue-on-error: true
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.deb
+            dist/*.rpm
       - name: Create release
+        if: needs.meta.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -91,3 +271,58 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes
+      - uses: actions/upload-artifact@v4
+        if: needs.meta.outputs.publish != 'true'
+        with:
+          name: release-dry-run
+          path: dist/*
+
+  homebrew:
+    name: update Homebrew tap
+    needs: [meta, release]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: gate
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "No HOMEBREW_TAP_TOKEN secret: skipping the tap update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          repository: ${{ vars.HOMEBREW_TAP_REPO || format('{0}/homebrew-tap', github.repository_owner) }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Update formula and push
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          ANCHOR_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Formula
+          [ -f tap/Formula/anchor.rb ] || cp packaging/homebrew/anchor.rb tap/Formula/anchor.rb
+          packaging/homebrew/update-formula.sh "${VERSION}" dist tap/Formula/anchor.rb
+          cd tap
+          git config user.name "anchor release bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add Formula/anchor.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date."
+          else
+            git commit -m "anchor ${VERSION}"
+            git push
+          fi

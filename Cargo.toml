@@ -249,9 +249,10 @@ git = "*"
 
 # `cargo binstall anchor` downloads the release archive instead of compiling.
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/anchor-{ version }-{ target }{ archive-suffix }"
+pkg-url = "{ repo }/releases/download/v{ version }/anchor-{ version }-{ target }.tar.gz"
 bin-dir = "anchor-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
+pkg-url = "{ repo }/releases/download/v{ version }/anchor-{ version }-{ target }.zip"

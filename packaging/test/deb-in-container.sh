@@ -1,5 +1,5 @@
 #!/bin/sh
-# Container-side check of the apt path. Run by `make test-apt` (see the Makefile):
+# Container-side check of the apt path. Run by `make test-apt`:
 #   docker run --rm -v <repo-dir>:/repo -v <this-script>:/t.sh:ro debian:bookworm-slim /t.sh trusted|signed
 set -eu
 export DEBIAN_FRONTEND=noninteractive
