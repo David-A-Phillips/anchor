@@ -373,6 +373,35 @@ impl Engine {
         })
     }
 
+    /// What a thread says: its own prose, else its first comment. The quoted diff hunk a review
+    /// thread is anchored to is not what was said.
+    fn thread_text(&self, thread: NodeId) -> Result<Option<String>> {
+        let store = self.store();
+        let prose = |node: NodeId| -> Result<Option<String>> {
+            Ok(store
+                .chunks_of(node)?
+                .into_iter()
+                .find(|chunk| chunk.kind != crate::base::ChunkKind::Code)
+                .map(|chunk| clip(&chunk.text)))
+        };
+        if let Some(text) = prose(thread)? {
+            return Ok(Some(text));
+        }
+        let mut comments: Vec<NodeId> = store
+            .edges_of(thread, 100)?
+            .into_iter()
+            .filter(|edge| edge.kind == EdgeKind::Contains && edge.from == thread)
+            .map(|edge| edge.to)
+            .collect();
+        comments.sort_unstable();
+        for comment in comments {
+            if let Some(text) = prose(comment)? {
+                return Ok(Some(text));
+            }
+        }
+        Ok(None)
+    }
+
     fn first_text(&self, node: NodeId) -> Result<Option<String>> {
         Ok(self
             .store()
@@ -462,7 +491,7 @@ impl Engine {
                 (EdgeKind::Approves, NodeKind::Approval, true) => decisions.push(Decision {
                     title: other.name.clone(),
                     decision: attr(&other, attrs::DECISION),
-                    reason: attr(&other, attrs::REASON),
+                    reason: attr(&other, attrs::REASON).map(|reason| clip(&reason)),
                     closed: closed(&other),
                 }),
                 (EdgeKind::Contains, NodeKind::Thread, false) => discussions.push(Discussion {
@@ -470,7 +499,7 @@ impl Engine {
                     status: attr(&other, attrs::THREAD_STATUS),
                     anchor: attr(&other, attrs::ANCHOR_TEXT),
                     closed: closed(&other),
-                    text: self.first_text(other.id)?,
+                    text: self.thread_text(other.id)?,
                 }),
                 (EdgeKind::Tracks | EdgeKind::Mentions, NodeKind::Ticket, _) => {
                     tickets.push(other);
@@ -485,6 +514,17 @@ impl Engine {
             _ => 2,
         });
         discussions.truncate(MAX_ITEMS);
+        // Decisions that were overturned or that asked for changes say the most about why the
+        // code ended up as it is; automated reviewers say the least.
+        decisions.sort_by_key(|d| {
+            let weight = match (d.closed.is_some(), d.decision.as_deref()) {
+                (true, _) => 0,
+                (_, Some(attrs::DECISION_CHANGES_REQUESTED | attrs::DECISION_REJECTED)) => 1,
+                (_, Some(attrs::DECISION_APPROVED)) => 2,
+                _ => 3,
+            };
+            (d.title.contains("[bot]"), weight)
+        });
         decisions.truncate(MAX_ITEMS);
         Ok((
             PullRequestTrail {
@@ -530,7 +570,7 @@ impl Engine {
                     }
                 }
                 None => gaps.push(format!(
-                    "the message names pull request #{number}, but its review is not ingested (try `anchor fetch`)"
+                    "the message refers to #{number}, but no pull request with that number is ingested (it may be an issue, or its review was not fetched; try `anchor fetch`)"
                 )),
             }
         }
