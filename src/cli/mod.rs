@@ -2,6 +2,7 @@
 
 pub mod atlassian;
 pub mod compare;
+mod daemon;
 pub mod eval;
 pub mod fetch;
 
@@ -18,9 +19,9 @@ use crate::config::provision::{
 };
 use crate::config::wizard;
 use crate::config::{AnchorConfig, default_config_path};
+use crate::engine::Engine;
 use crate::engine::query::{QueryDeps, QueryEngine, QueryMode, QueryRequest};
 use crate::engine::watcher::FileWatcher;
-use crate::engine::{Engine, EngineEvent};
 use crate::metrics::{TimeRange, format_usd};
 use crate::sync::identity::{DeviceIdentity, TrustPolicy, TrustedDevices};
 use crate::sync::{
@@ -574,81 +575,28 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 None
             };
             // Embed new chunks shortly after graph changes, off the ingest path.
-            let embedder = engine.clone();
-            let mut events = engine.subscribe();
-            let embedding = tokio::spawn(async move {
-                loop {
-                    match events.recv().await {
-                        Ok(EngineEvent::GraphChanged { .. }) => {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            if let Err(err) = embedder.embed_pending().await {
-                                tracing::warn!("embedding failed: {err}");
-                            }
-                            // Tag and summarise new material in the background, a little at a
-                            // time; nobody waits on this.
-                            if let Err(err) = embedder.enrich(25).await {
-                                tracing::warn!("enrichment failed: {err}");
-                            }
-                        }
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            });
+            let embedding = daemon::spawn_embed_loop(&engine);
             let web = if engine.config().web.enabled && !no_web {
                 let addr = format!("{}:{}", engine.config().web.bind, engine.config().web.port);
                 println!("Dashboard: http://{addr}");
-                Some(tokio::spawn(crate::web::serve(
-                    engine.clone(),
-                    query_engine(&engine),
-                )))
+                let (served, queries) = (engine.clone(), query_engine(&engine));
+                Some(tokio::spawn(async move {
+                    // A dashboard that cannot start (port taken, bad bind address) must not die
+                    // silently inside a detached task.
+                    if let Err(err) = crate::web::serve(served, queries).await {
+                        tracing::error!("the dashboard stopped: {err}");
+                        eprintln!("anchor: the dashboard on {addr} stopped: {err}");
+                    }
+                }))
             } else {
                 None
             };
             // Keep configured GitHub boards exported; changed files are picked up by re-scanning
             // the sources that read them.
-            let mut refreshers = Vec::new();
-            for entry in engine
-                .config()
-                .github
-                .iter()
-                .filter(|entry| entry.interval_minutes > 0)
-            {
-                let options = fetch::FetchOptions::from_config(entry, engine.paths());
-                let period = Duration::from_secs(entry.interval_minutes.max(5) * 60);
-                let engine = engine.clone();
-                refreshers.push(tokio::spawn(async move {
-                    let mut timer = tokio::time::interval(period);
-                    loop {
-                        timer.tick().await;
-                        let (options, engine) = (options.clone(), engine.clone());
-                        let repository = options.repository.clone();
-                        let outcome =
-                            tokio::task::spawn_blocking(move || -> Result<fetch::FetchReport> {
-                                let report = fetch::fetch_github(&options)?;
-                                if report.issues + report.discussions + report.pulls > 0 {
-                                    for source in &engine.config().sources {
-                                        if std::path::Path::new(&source.location)
-                                            .starts_with(&options.out)
-                                        {
-                                            engine.scan_source(&source.id)?;
-                                        }
-                                    }
-                                }
-                                Ok(report)
-                            })
-                            .await;
-                        match outcome {
-                            Ok(Ok(report)) => tracing::info!("refreshed {repository}: {report:?}"),
-                            Ok(Err(err)) => tracing::warn!("refreshing {repository} failed: {err}"),
-                            Err(err) => tracing::warn!("refresh task failed: {err}"),
-                        }
-                    }
-                }));
-            }
+            let mut refreshers = daemon::spawn_github_refreshers(&engine);
             refreshers.extend(atlassian::spawn_refreshers(&engine));
             println!("Anchor is running. Press Ctrl-C to stop.");
-            tokio::signal::ctrl_c().await?;
+            daemon::shutdown_signal().await;
             embedding.abort();
             for refresher in refreshers {
                 refresher.abort();
@@ -694,7 +642,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let engine = open_engine(config).await?;
             let summary = engine
                 .ledger()
-                .summary(TimeRange::last(Duration::from_secs(days * 86_400)))?;
+                .summary(TimeRange::last(Duration::from_secs(
+                    days.saturating_mul(86_400),
+                )))?;
             for locality in [crate::base::Locality::Local, crate::base::Locality::Cloud] {
                 let stats = summary.locality(locality);
                 println!("{locality:<6} {stats:?}");
@@ -770,7 +720,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 options.identity.device_id()
             );
             SyncServer::serve(listener, graph_unit_store(&engine, false), options, async {
-                let _ = tokio::signal::ctrl_c().await;
+                daemon::shutdown_signal().await;
             })
             .await?;
         }

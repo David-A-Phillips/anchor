@@ -1,10 +1,9 @@
 //! The `anchor fetch-atlassian` command and the daemon's periodic refresh.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use super::{AtlassianOptions, TokioSleeper, fetch_atlassian};
+use super::{AtlassianOptions, AtlassianReport, Sleeper, TokioSleeper, fetch_atlassian};
 use crate::base::{Error, Result};
 use crate::config::{AnchorConfig, AtlassianConfig, AtlassianDeployment};
 use crate::engine::Engine;
@@ -121,6 +120,20 @@ pub async fn run_command(config: &AnchorConfig, args: FetchAtlassianArgs) -> Res
     Ok(())
 }
 
+/// One refresh of a configured site: exports what changed and, when anything did, re-scans the
+/// sources reading the export directory (so the graph follows the files).
+pub async fn refresh_once(
+    engine: &Arc<Engine>,
+    options: &AtlassianOptions,
+    sleeper: &dyn Sleeper,
+) -> Result<AtlassianReport> {
+    let report = fetch_atlassian(options, sleeper).await?;
+    if report.pages + report.issues + report.removed > 0 {
+        crate::cli::daemon::rescan_under(engine, &options.out).await?;
+    }
+    Ok(report)
+}
+
 /// Starts the daemon's periodic refresh of every `[[atlassian]]` entry with `interval_minutes > 0`.
 /// After a refresh that changed files, the sources reading the export directory are re-scanned.
 pub fn spawn_refreshers(engine: &Arc<Engine>) -> Vec<tokio::task::JoinHandle<()>> {
@@ -139,33 +152,16 @@ pub fn spawn_refreshers(engine: &Arc<Engine>) -> Vec<tokio::task::JoinHandle<()>
                     continue;
                 }
             };
-        let period = Duration::from_secs(entry.interval_minutes.max(5) * 60);
+        let period = crate::cli::daemon::refresh_period(entry.interval_minutes);
         let engine = engine.clone();
         handles.push(tokio::spawn(async move {
             let mut timer = tokio::time::interval(period);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 timer.tick().await;
-                match fetch_atlassian(&options, &TokioSleeper).await {
+                match refresh_once(&engine, &options, &TokioSleeper).await {
                     Ok(report) => {
                         tracing::info!("refreshed {}: {}", options.base_url, report.summary());
-                        if report.pages + report.issues + report.removed > 0 {
-                            let (engine, out) = (engine.clone(), options.out.clone());
-                            let rescanned = tokio::task::spawn_blocking(move || -> Result<()> {
-                                for source in &engine.config().sources {
-                                    if Path::new(&source.location).starts_with(&out) {
-                                        engine.scan_source(&source.id)?;
-                                    }
-                                }
-                                Ok(())
-                            })
-                            .await;
-                            if !matches!(rescanned, Ok(Ok(()))) {
-                                tracing::warn!(
-                                    "re-scanning after refreshing {} failed",
-                                    options.base_url
-                                );
-                            }
-                        }
                     }
                     Err(err) => tracing::warn!("refreshing {} failed: {err}", options.base_url),
                 }

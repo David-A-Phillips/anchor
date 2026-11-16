@@ -117,7 +117,11 @@ async fn a_node_gets_tags_a_summary_an_answers_chunk_and_mention_edges() {
         .find(|chunk| chunk.source.as_str() == ENRICHMENT_SOURCE)
         .expect("a chunk from the enrichment source");
     assert_eq!(description.kind, ChunkKind::Description);
-    assert!(description.text.starts_with("Summary: How charges are retried."));
+    assert!(
+        description
+            .text
+            .starts_with("Summary: How charges are retried.")
+    );
     assert!(description.text.contains("Tags: retries, backoff"));
     assert!(
         description
@@ -133,8 +137,14 @@ async fn a_node_gets_tags_a_summary_an_answers_chunk_and_mention_edges() {
 
     // The model-named entity became a low-confidence Mentions edge to the ticket; the 1-character
     // "entity" was ignored.
-    let tickets = engine.store().nodes_by_kind(NodeKind::Ticket, 10, 0).unwrap();
-    let pay2 = tickets.iter().find(|t| t.key.as_str().ends_with("PAY-2")).unwrap();
+    let tickets = engine
+        .store()
+        .nodes_by_kind(NodeKind::Ticket, 10, 0)
+        .unwrap();
+    let pay2 = tickets
+        .iter()
+        .find(|t| t.key.as_str().ends_with("PAY-2"))
+        .unwrap();
     let edges = engine.store().edges_of(page.id, 100).unwrap();
     let mention = edges
         .iter()
@@ -161,7 +171,10 @@ async fn unchanged_nodes_are_skipped_and_failures_are_counted_and_retried() {
     model.always(ScriptedReply::Text(GOOD.to_owned()));
     let calls_before = model.calls();
     let second = engine.enrich_with(&router(&model), 10).await.unwrap();
-    assert_eq!((second.enriched, second.failed, second.unchanged), (2, 0, 1));
+    assert_eq!(
+        (second.enriched, second.failed, second.unchanged),
+        (2, 0, 1)
+    );
     assert_eq!(model.calls() - calls_before, 2);
 
     // Third pass: nothing left to do.
