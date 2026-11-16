@@ -222,6 +222,17 @@ pub fn questions(store: &GraphStore, truth: &GroundTruth) -> Result<Vec<Question
             phrases: false,
         });
     }
+    for q in &truth.prose {
+        out.push(Question {
+            id: q.id.clone(),
+            category: "prose".into(),
+            kind: q.kind.clone(),
+            question: q.question.clone(),
+            expected: q.key_phrases.iter().map(|p| vec![p.clone()]).collect(),
+            stale: Vec::new(),
+            phrases: true,
+        });
+    }
     out.retain(|q| !q.expected.is_empty() && q.expected.iter().all(|g| !g.is_empty()));
     Ok(out)
 }

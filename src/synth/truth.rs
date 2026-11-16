@@ -174,6 +174,22 @@ pub struct RelationshipQuestion {
     pub paths: Vec<Vec<PathStep>>,
 }
 
+/// A question answered by the prose of a page (a runbook step, a design statement).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProseQuestion {
+    /// Unique id within the dataset.
+    pub id: String,
+    /// `runbook_step` or `design_statement`, with `_paraphrased` appended when the question
+    /// avoids the page's own wording (what keyword search cannot match).
+    pub kind: String,
+    /// The question in natural language.
+    pub question: String,
+    /// Key of the page that answers it.
+    pub subject_key: String,
+    /// Phrases of the page that an answer must convey.
+    pub key_phrases: Vec<String>,
+}
+
 /// Everything `ground_truth.json` holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroundTruth {
@@ -185,6 +201,9 @@ pub struct GroundTruth {
     pub justification: Vec<JustificationQuestion>,
     /// Multi-hop relationship questions.
     pub relationships: Vec<RelationshipQuestion>,
+    /// Questions answered by page prose.
+    #[serde(default)]
+    pub prose: Vec<ProseQuestion>,
 }
 
 impl GroundTruth {
@@ -206,6 +225,9 @@ impl GroundTruth {
             keys.push(&q.subject_key);
             keys.extend(q.expected_keys.iter().map(String::as_str));
             keys.extend(q.paths.iter().flatten().map(|step| step.key.as_str()));
+        }
+        for q in &self.prose {
+            keys.push(&q.subject_key);
         }
         keys.sort_unstable();
         keys.dedup();
@@ -229,6 +251,9 @@ impl GroundTruth {
             *counts
                 .entry(format!("relationship.{}", q.kind.as_str()))
                 .or_insert(0) += 1;
+        }
+        for q in &self.prose {
+            *counts.entry(format!("prose.{}", q.kind)).or_insert(0) += 1;
         }
         counts
     }

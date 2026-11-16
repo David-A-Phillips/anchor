@@ -347,6 +347,57 @@ struct Retrieved {
     authoritative: bool,
 }
 
+/// The content words of a text, lower-cased and lightly stemmed, for matching a question
+/// against candidate passages.
+fn question_terms(text: &str) -> HashSet<String> {
+    const COMMON: &[&str] = &[
+        "what",
+        "when",
+        "where",
+        "which",
+        "does",
+        "that",
+        "this",
+        "with",
+        "from",
+        "have",
+        "should",
+        "would",
+        "could",
+        "about",
+        "there",
+        "their",
+        "they",
+        "them",
+        "then",
+        "than",
+        "into",
+        "been",
+        "being",
+        "were",
+        "will",
+        "your",
+        "ours",
+        "supposed",
+        "according",
+    ];
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| word.len() >= 4)
+        .map(str::to_lowercase)
+        .filter(|word| !COMMON.contains(&word.as_str()))
+        .map(|word| {
+            let stem = word
+                .strip_suffix("ing")
+                .or_else(|| word.strip_suffix("ed"))
+                .or_else(|| word.strip_suffix("es"))
+                .or_else(|| word.strip_suffix('s'))
+                .filter(|stem| stem.len() >= 4)
+                .map(str::to_owned);
+            stem.unwrap_or(word)
+        })
+        .collect()
+}
+
 /// "by <who>: " when the node records who closed or dismissed it.
 fn closed_by(node: &NodeRecord) -> String {
     node.attrs
@@ -411,11 +462,29 @@ impl QueryEngine {
         Ok(self.deps.store.node(id)?.as_ref().map(NodeRef::from))
     }
 
-    fn snippets(&self, id: NodeId, max: usize) -> Result<Vec<Snippet>> {
-        Ok(self
-            .deps
-            .store
-            .chunks_of(id)?
+    /// Up to `max` pieces of the node's text: those sharing the most words with the question,
+    /// in document order (a long page is quoted where it is relevant, not from its top).
+    fn snippets(&self, id: NodeId, max: usize, terms: &HashSet<String>) -> Result<Vec<Snippet>> {
+        let mut chunks = self.deps.store.chunks_of(id)?;
+        if chunks.len() > max && !terms.is_empty() {
+            let mut scored: Vec<(usize, usize)> = chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    let words = question_terms(&chunk.text);
+                    (terms.intersection(&words).count(), index)
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            let mut keep: Vec<usize> = scored.into_iter().take(max).map(|(_, i)| i).collect();
+            keep.sort_unstable();
+            let mut index = 0;
+            chunks.retain(|_| {
+                index += 1;
+                keep.contains(&(index - 1))
+            });
+        }
+        Ok(chunks
             .into_iter()
             .take(max)
             .map(|chunk| Snippet {
@@ -656,6 +725,34 @@ impl QueryEngine {
         let paths = if chain.is_some() { followed } else { paths };
 
         // 3. Assemble.
+        let terms = question_terms(&request.query);
+        // Pages written as the documentation of a named entity (its runbook, its design note)
+        // are where "how do I ..." and open questions about it are answered.
+        let mut documentation: Vec<(usize, NodeId)> = Vec::new();
+        if matches!(
+            intent.kind,
+            IntentKind::HowTo | IntentKind::General | IntentKind::Definition
+        ) && chain.is_none()
+        {
+            for seed in seeds.iter().filter(|seed| seed.cost <= 0.5).take(3) {
+                for edge in store.edges_of(seed.node, 200)? {
+                    if edge.kind != EdgeKind::Documents || edge.to != seed.node {
+                        continue;
+                    }
+                    let overlap = store
+                        .chunks_of(edge.from)?
+                        .iter()
+                        .map(|chunk| terms.intersection(&question_terms(&chunk.text)).count())
+                        .max()
+                        .unwrap_or(0);
+                    if !documentation.iter().any(|(_, node)| *node == edge.from) {
+                        documentation.push((overlap, edge.from));
+                    }
+                }
+            }
+            documentation.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            documentation.truncate(3);
+        }
         let mut bundle = ContextBundle::default();
         let mut seen: HashSet<NodeId> = HashSet::new();
         let mut push = |this: &Self,
@@ -671,7 +768,7 @@ impl QueryEngine {
             let Some(record) = this.deps.store.node(node)? else {
                 return Ok(());
             };
-            let snippets = this.snippets(node, 2)?;
+            let snippets = this.snippets(node, 2, &terms)?;
             let cost: usize = snippets.iter().map(|s| s.text.len() / 4).sum::<usize>() + 24;
             if bundle.tokens + cost > budget && !bundle.items.is_empty() {
                 return Ok(());
@@ -760,6 +857,9 @@ impl QueryEngine {
         }
         for seed in &seeds {
             push(self, seed.node, ItemRole::Evidence, 0.9, None, &mut bundle)?;
+        }
+        for (_, page) in &documentation {
+            push(self, *page, ItemRole::Evidence, 0.85, None, &mut bundle)?;
         }
         for path in &paths {
             for node in &path.nodes {

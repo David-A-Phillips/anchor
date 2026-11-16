@@ -328,6 +328,8 @@ pub(crate) fn emit(ctx: &mut Ctx) -> Result<()> {
         let mut slug_for_threads = String::new();
         let mut thread_count = 0;
         let mut html = false;
+        // (kind, question, phrase the page states)
+        let mut prose: Vec<(&str, String, String)> = Vec::new();
         match &page.kind {
             Kind::Stale(index) => {
                 let service = &plan.services[*index];
@@ -403,6 +405,31 @@ pub(crate) fn emit(ctx: &mut Ctx) -> Result<()> {
                 if let Some(ticket) = plan.tickets.iter().find(|t| t.service == *index) {
                     let _ = writeln!(body, "Follow-up work is tracked in {}.", ticket.key);
                 }
+                let noun = words::NOUNS[*index % words::NOUNS.len()];
+                prose.push((
+                    "runbook_step",
+                    format!(
+                        "What does the {} runbook say to do when the queue depth stays above the alert threshold?",
+                        service.slug
+                    ),
+                    format!("Restart the {} workers", service.slug),
+                ));
+                prose.push((
+                    "runbook_step_paraphrased",
+                    format!(
+                        "The {} backlog keeps growing past its alarm limit. What is the documented remedy?",
+                        service.slug
+                    ),
+                    format!("Restart the {} workers", service.slug),
+                ));
+                prose.push((
+                    "runbook_step_paraphrased",
+                    format!(
+                        "In {}, requests for a {noun} keep erroring out. How are we supposed to handle that?",
+                        service.slug
+                    ),
+                    format!("Retry failed {noun} calls with a bounded backoff"),
+                ));
                 anchors = vec![restart, retry, escalate];
                 slug_for_threads = service.slug.clone();
                 thread_count = 3;
@@ -428,6 +455,24 @@ pub(crate) fn emit(ctx: &mut Ctx) -> Result<()> {
                     escape(&first),
                     escape(&second)
                 );
+                let topic_name = words::WIKI_TOPICS[*topic].to_lowercase();
+                let store = words::NOUNS[(*index + *topic) % words::NOUNS.len()];
+                prose.push((
+                    "design_statement",
+                    format!(
+                        "Where does the {topic_name} design of {} keep state?",
+                        service.slug
+                    ),
+                    format!("keeps state in {store}"),
+                ));
+                prose.push((
+                    "design_statement_paraphrased",
+                    format!(
+                        "For {}'s approach to {topic_name}, what holds the persisted data?",
+                        service.slug
+                    ),
+                    format!("keeps state in {store}"),
+                ));
                 anchors = vec![first, second];
                 slug_for_threads = service.slug.clone();
                 thread_count = 2;
@@ -455,6 +500,17 @@ pub(crate) fn emit(ctx: &mut Ctx) -> Result<()> {
             Vec::new()
         };
         record_truth(ctx, page, &threads, &mut thread_questions);
+        let page_key = keys::wiki_page(&SourceId::new(SOURCE_WIKI), &page.id).to_string();
+        for (kind, question, phrase) in prose {
+            let id = question_id("prose", ctx.truth.prose.len() + 1);
+            ctx.truth.prose.push(super::truth::ProseQuestion {
+                id,
+                kind: kind.to_owned(),
+                question,
+                subject_key: page_key.clone(),
+                key_phrases: vec![phrase],
+            });
+        }
         ctx.report.wiki_pages += 1;
         ctx.report.wiki_threads += threads.len();
 
