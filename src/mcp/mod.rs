@@ -14,6 +14,8 @@
 //! * `deepen`: ingest a shallow source more deeply, then ask again.
 //! * `status`: what is indexed and at which depth.
 
+pub mod install;
+
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
