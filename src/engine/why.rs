@@ -119,6 +119,8 @@ pub struct CommitTrail {
     pub date: String,
     /// Subject line.
     pub subject: String,
+    /// What kind of change the message announces (`fix`, `revert`, `feature`, ...), if any.
+    pub change_type: Option<String>,
     /// Rest of the message.
     pub body: String,
     /// Lines of the asked range last changed by this commit (0 when blame was not available).
@@ -596,6 +598,7 @@ impl Engine {
             author: commit.author.clone(),
             date: commit.date.clone(),
             subject,
+            change_type: history::change_type(&commit.message).map(str::to_owned),
             body: clip(message.next().unwrap_or("")),
             lines,
             pull_requests,
@@ -759,6 +762,9 @@ pub fn render(report: &WhyReport) -> String {
         ));
         if commit.lines > 0 {
             out.push_str(&format!(" — {} line(s)", commit.lines));
+        }
+        if let Some(kind) = &commit.change_type {
+            out.push_str(&format!(" [{kind}]"));
         }
         out.push_str(&format!("\n  {}\n", commit.subject));
         if !commit.body.is_empty() {

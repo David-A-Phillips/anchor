@@ -36,6 +36,8 @@ use crate::base::{
 
 /// Commit attribute: the full hash.
 pub const ATTR_SHA: &str = "sha";
+/// Commit attribute: what kind of change the message announces (see [`change_type`]).
+pub const ATTR_CHANGE_TYPE: &str = "change_type";
 /// Commit attribute: number of files the commit changed.
 pub const ATTR_FILES_CHANGED: &str = "files_changed";
 
@@ -273,6 +275,77 @@ pub fn refs(message: &str) -> Refs {
     out
 }
 
+/// What kind of change a commit message announces: `revert`, `security`, `fix`, `performance`,
+/// `feature`, `refactor`, `docs`, `test`, `build`, `chore` or `merge`. Read from conventional
+/// commit prefixes (`fix:`, `feat(scope):`) and, failing that, from the subject's wording.
+/// `None` when the subject gives no hint.
+pub fn change_type(message: &str) -> Option<&'static str> {
+    let subject = message.lines().next().unwrap_or("").trim().to_lowercase();
+    if subject.starts_with("revert") {
+        return Some("revert");
+    }
+    if subject.starts_with("merge ") {
+        return Some("merge");
+    }
+    let prefix = subject
+        .split_once(':')
+        .map(|(prefix, _)| {
+            prefix
+                .split('(')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('!')
+                .trim()
+        })
+        .unwrap_or("");
+    let by_prefix = match prefix {
+        "fix" | "bugfix" | "hotfix" => Some("fix"),
+        "feat" | "feature" => Some("feature"),
+        "perf" => Some("performance"),
+        "refactor" => Some("refactor"),
+        "docs" | "doc" => Some("docs"),
+        "test" | "tests" => Some("test"),
+        "build" | "ci" | "deps" => Some("build"),
+        "chore" | "style" => Some("chore"),
+        "security" | "sec" => Some("security"),
+        _ => None,
+    };
+    if by_prefix.is_some() {
+        return by_prefix;
+    }
+    let padded = format!(" {subject} ");
+    let has = |words: &[&str]| words.iter().any(|word| padded.contains(word));
+    if has(&[" cve-", " security ", " vulnerab", " xss ", " injection "]) {
+        Some("security")
+    } else if has(&[
+        " fix ",
+        " fixes ",
+        " fixed ",
+        " hotfix",
+        " bug ",
+        " regression",
+        " workaround",
+    ]) {
+        Some("fix")
+    } else if has(&[" performance", " speed up", " faster ", " optimi"]) {
+        Some("performance")
+    } else if has(&[
+        " refactor",
+        " rename ",
+        " cleanup",
+        " clean up",
+        " simplify",
+    ]) {
+        Some("refactor")
+    } else if has(&[" bump ", " upgrade ", " update dependenc"]) {
+        Some("build")
+    } else if has(&[" add ", " adds ", " introduce", " implement", " support "]) {
+        Some("feature")
+    } else {
+        None
+    }
+}
+
 /// The author as a person: GitHub's no-reply addresses carry the account handle, not a mailbox.
 pub fn author_identity(name: &str, email: &str) -> PersonIdentity {
     let email = email.trim().to_ascii_lowercase();
@@ -319,6 +392,7 @@ pub fn commit_unit(
             .alias(commit.short())
             .attr(ATTR_SHA, commit.sha.as_str())
             .attr(ATTR_FILES_CHANGED, commit.files.len() as u64)
+            .attr_opt(ATTR_CHANGE_TYPE, change_type(&commit.message))
             .attr_opt(
                 attrs::CREATED_AT,
                 (!commit.date.is_empty()).then(|| commit.date.clone()),
@@ -432,6 +506,34 @@ mod tests {
             Vec::<u64>::new()
         );
         assert_eq!(refs("issue#12 is unrelated"), Refs::default());
+    }
+
+    #[test]
+    fn change_types_are_read_from_prefixes_and_wording() {
+        assert_eq!(
+            change_type("Revert \"PAY-12: retry charges\""),
+            Some("revert")
+        );
+        assert_eq!(
+            change_type("fix(ledger): off-by-one in totals"),
+            Some("fix")
+        );
+        assert_eq!(change_type("feat!: new settlement API"), Some("feature"));
+        assert_eq!(
+            change_type("Alerting: Fix panic on empty rule group (#9)"),
+            Some("fix")
+        );
+        assert_eq!(change_type("Bump golang.org/x/net to 0.30"), Some("build"));
+        assert_eq!(change_type("Merge pull request #7 from a/b"), Some("merge"));
+        assert_eq!(
+            change_type("Patch CVE-2025-1234 in the parser"),
+            Some("security")
+        );
+        assert_eq!(
+            change_type("Dashboards: Add panel actions popover"),
+            Some("feature")
+        );
+        assert_eq!(change_type("wip"), None);
     }
 
     #[test]

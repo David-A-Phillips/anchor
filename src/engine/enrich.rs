@@ -54,6 +54,9 @@ struct ModelOutput {
     tags: Vec<String>,
     #[serde(default)]
     entities: Vec<String>,
+    /// Questions the text answers, phrased the way someone who has not read it would ask.
+    #[serde(default)]
+    questions: Vec<String>,
 }
 
 fn parse(text: &str) -> Option<ModelOutput> {
@@ -145,11 +148,11 @@ impl Engine {
                 continue;
             }
             let prompt = format!(
-                "Summarise this {kind} for an engineering knowledge graph. Reply with JSON only: {{\"summary\": one sentence, \"tags\": 3 to 6 short lowercase topic tags, \"entities\": names of the services, APIs, teams or tickets it is about, exactly as written}}.\n\n{text}"
+                "Summarise this {kind} for an engineering knowledge graph. Reply with JSON only: {{\"summary\": one sentence, \"tags\": 3 to 6 short lowercase topic tags, \"entities\": names of the services, APIs, teams or tickets it is about, exactly as written, \"questions\": 2 or 3 short questions this text answers, worded as someone who has not read it would ask, using everyday synonyms rather than the text's own terms}}.\n\n{text}"
             );
             let request = CompletionRequest::prompt(CallPurpose::Other, prompt)
                 .with_format(ResponseFormat::Json)
-                .with_max_tokens(300);
+                .with_max_tokens(400);
             let output = match router.complete(ModelTier::System1, request).await {
                 Ok(routed) => parse(&routed.completion.text),
                 Err(err) => {
@@ -181,15 +184,24 @@ impl Engine {
                 node = node.alias(tag.as_str());
             }
             let node = unit.add_node(node);
-            unit.add_chunk(
-                &node,
-                ChunkKind::Description,
-                format!(
-                    "Summary: {}\nTags: {}",
-                    output.summary.trim(),
-                    tags.join(", ")
-                ),
+            // The questions are what lets a differently worded query find the text by
+            // full-text search, without a neural embedding model.
+            let questions: Vec<&str> = output
+                .questions
+                .iter()
+                .map(|q| q.trim())
+                .filter(|q| q.len() >= 8 && q.len() <= 200)
+                .take(4)
+                .collect();
+            let mut description = format!(
+                "Summary: {}\nTags: {}",
+                output.summary.trim(),
+                tags.join(", ")
             );
+            if !questions.is_empty() {
+                description.push_str(&format!("\nAnswers: {}", questions.join(" | ")));
+            }
+            unit.add_chunk(&node, ChunkKind::Description, description);
             for entity in output.entities.iter().take(8) {
                 let entity = entity.trim();
                 if entity.len() >= 3 {
