@@ -1,0 +1,11 @@
+#!/bin/sh
+# Creates the unprivileged `anchor` account used by anchor-server.service. It never enables or
+# starts a service: the server needs a token and a deliberate decision first.
+set -e
+if [ "$1" = "configure" ]; then
+    if ! getent passwd anchor >/dev/null; then
+        adduser --system --group --home /var/lib/anchor --no-create-home \
+            --gecos "Anchor sync server" --shell /usr/sbin/nologin anchor >/dev/null
+    fi
+fi
+exit 0

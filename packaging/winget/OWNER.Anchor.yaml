@@ -1,0 +1,28 @@
+# UNTESTED winget manifest skeleton (singleton form). For a real submission to
+# microsoft/winget-pkgs, split it into the three-file layout and validate it:
+#   winget validate --manifest <dir>
+#   wingetcreate update OWNER.Anchor --version <v> --urls <zip-url> --submit
+# Replace OWNER, the checksum (the .sha256 file of the zip, upper-case) and the license.
+PackageIdentifier: OWNER.Anchor
+PackageVersion: 0.1.0
+PackageName: Anchor
+Publisher: OWNER
+PackageUrl: https://github.com/OWNER/anchor
+License: TODO(owner)
+ShortDescription: Local-first context engine and sync daemon that grounds AI models in your codebases
+Moniker: anchor
+Tags:
+  - mcp
+  - context
+  - code-search
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: anchor-0.1.0-x86_64-pc-windows-msvc\anchor.exe
+        PortableCommandAlias: anchor
+    InstallerUrl: https://github.com/OWNER/anchor/releases/download/v0.1.0/anchor-0.1.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: singleton
+ManifestVersion: 1.6.0

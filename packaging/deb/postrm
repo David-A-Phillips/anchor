@@ -1,0 +1,12 @@
+#!/bin/sh
+# Only `apt purge` removes the account and the server's data.
+set -e
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/anchor
+    rm -f /etc/anchor/server.env
+    if getent passwd anchor >/dev/null; then
+        deluser --system anchor >/dev/null 2>&1 || true
+    fi
+    rmdir /etc/anchor 2>/dev/null || true
+fi
+exit 0

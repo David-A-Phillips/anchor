@@ -1,0 +1,27 @@
+# Anchor daemon as a per-user service. Not enabled automatically.
+#
+#   anchor init                                  # write ~/.config/anchor/anchor.toml, then edit it
+#   systemctl --user enable --now anchor.service
+#   journalctl --user -u anchor.service -f
+[Unit]
+Description=Anchor context daemon (watches your sources and serves the dashboard)
+Documentation=man:anchor(1)
+# The daemon needs a configuration; stay quiet until `anchor init` or `anchor setup` wrote one.
+ConditionPathExists=%E/anchor/anchor.toml
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/anchor daemon
+Restart=on-failure
+RestartSec=5
+# Sandboxing that is safe for a per-user service that reads the user's repositories.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

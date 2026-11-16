@@ -1,0 +1,14 @@
+# /etc/anchor/anchor.toml: configuration of the system service `anchor-server.service`
+# (it is passed to the server through ANCHOR_CONFIG; per-user `anchor` runs use
+# ~/.config/anchor/anchor.toml, created by `anchor init`).
+#
+# Data (database, device keys) lives in /var/lib/anchor.
+mode = "server"
+
+[sync]
+# Loopback by default. Put a TLS-terminating reverse proxy in front of it (see
+# /usr/share/doc/anchor-context/install.md) or change this to a LAN address you trust.
+listen = "127.0.0.1:7891"
+# Clients must present this token as a bearer token. Put `ANCHOR_SYNC_TOKEN=...` in
+# /etc/anchor/server.env (mode 0640, group anchor).
+auth_token_env = "ANCHOR_SYNC_TOKEN"

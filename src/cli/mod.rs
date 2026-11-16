@@ -2,6 +2,7 @@
 
 pub mod atlassian;
 pub mod compare;
+mod dist;
 pub mod eval;
 pub mod fetch;
 
@@ -208,6 +209,16 @@ enum Command {
         #[command(subcommand)]
         action: OllamaAction,
     },
+    /// Print a shell completion script (used when packaging).
+    #[command(hide = true)]
+    Completions {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: dist::CompletionShell,
+    },
+    /// Print the man page in roff format (used when packaging).
+    #[command(hide = true)]
+    Man,
 }
 
 /// Sizes of the `demo` dataset.
@@ -449,6 +460,8 @@ fn print_progress(event: ProvisionEvent) {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Completions { shell } => dist::completions::<Cli>(shell),
+        Command::Man => dist::man::<Cli>()?,
         Command::Init { force } => {
             let path = cli.config.clone().unwrap_or_else(default_config_path);
             if path.exists() && !force {
