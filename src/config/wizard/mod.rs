@@ -22,6 +22,8 @@ mod flow;
 mod prompter;
 mod review;
 mod sources;
+crate::base::opaque_debug!(WizardEnvironment);
+
 #[cfg(test)]
 mod tests;
 mod tiers;

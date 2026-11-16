@@ -314,3 +314,5 @@ pub(crate) fn compute_edit(old: &str, new: &str) -> Option<InputEdit> {
         new_end_position: advance(start_position, &new[prefix..new_end]),
     })
 }
+
+crate::base::opaque_debug!(IncrementalParser);

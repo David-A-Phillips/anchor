@@ -53,7 +53,7 @@
 //!
 //! Entries are yielded before the payload hash can be checked. Importers that must not act on
 //! unauthenticated entries call [`PackReader::verify_payload`] first (it needs `Seek`), as
-//! [`import_pack`](super::import_pack) does.
+//! `Engine::import_pack` does.
 //!
 //! Writer and reader hold one record in memory at a time. The writer spools the compressed payload
 //! to an anonymous temporary file, because the manifest that precedes it in the file is only known
@@ -576,6 +576,15 @@ fn truncated(err: io::Error, what: &str) -> Error {
     }
 }
 
+impl<R: Read> std::fmt::Debug for PackReader<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackReader")
+            .field("manifest", &self.manifest)
+            .field("raw_read", &self.raw_read)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Read> PackReader<R> {
     /// Reads and verifies the header, manifest and signature. Nothing of the payload is read yet.
     ///
@@ -868,6 +877,8 @@ impl<R: Read> Iterator for PackReader<R> {
         }
     }
 }
+
+crate::base::opaque_debug!(@'a; PackWriter<'a>);
 
 #[cfg(test)]
 pub(crate) mod tests {

@@ -48,3 +48,5 @@ impl RemoteTiles for SyncTiles {
         Ok(())
     }
 }
+
+crate::base::opaque_debug!(SyncTiles);

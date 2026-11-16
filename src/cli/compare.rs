@@ -961,4 +961,263 @@ mod tests {
         assert!(scores["all"].context_recall.abs() < 1e-9);
         assert!(scores["all"].context_tokens <= CONTEXT_TOKENS as f64 * 1.01);
     }
+
+    #[test]
+    fn one_oversized_multibyte_context_is_cut_on_a_character_boundary() {
+        let blob = "é".repeat(CONTEXT_TOKENS * 4);
+        let (kept, tokens) = budgeted_list(&[blob]);
+        assert_eq!(kept.len(), 1);
+        assert!(tokens <= CONTEXT_TOKENS);
+        assert!(budgeted_list(&[]).0.is_empty());
+    }
+
+    // ---- on-disk run directories -------------------------------------------------------------
+
+    fn write(dir: &Path, rel: &str, text: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, text).expect("write");
+    }
+
+    fn line<T: Serialize>(row: &T) -> String {
+        format!("{}\n", serde_json::to_string(row).expect("json"))
+    }
+
+    /// Two ownership questions (one with a stale claim) and one justification question.
+    fn run_directory() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut owner = question(&[&["core team"]], &[&["legacy team"]], false);
+        owner.id = "own-1".into();
+        let mut other = question(&[&["bob"]], &[], false);
+        other.id = "own-2".into();
+        let mut why = question(&[&["capped at three retries"]], &[], true);
+        why.id = "why-1".into();
+        why.category = "justification".into();
+        why.kind = "dismissed".into();
+        let questions: String = [&owner, &other, &why].iter().map(|q| line(*q)).collect();
+        write(
+            dir.path(),
+            "questions.jsonl",
+            &format!("{questions}\n   \n"),
+        );
+
+        let row = |id: &str, contexts: &[&str], answer: Option<&str>| SystemResult {
+            id: id.into(),
+            contexts: contexts.iter().map(|c| (*c).to_owned()).collect(),
+            answer: answer.map(str::to_owned),
+            generated_answer: None,
+            latency_ms: 2.0,
+        };
+        let perfect: String = [
+            row("own-1", &["The core team owns it"], Some("core team")),
+            row("own-2", &["bob owns it"], Some("bob")),
+            row(
+                "why-1",
+                &["capped at three retries"],
+                Some("capped at three retries"),
+            ),
+        ]
+        .iter()
+        .map(line)
+        .collect();
+        // Answers only one of three questions: the other two score zero rather than vanishing.
+        let partial = line(&row("own-1", &["legacy team, then core team"], None));
+        write(dir.path(), "results/anchor.jsonl", &perfect);
+        write(dir.path(), "results/baseline-fulltext.jsonl", &partial);
+        write(dir.path(), "results/zeta.jsonl", &partial);
+        write(dir.path(), "results/alpha.jsonl", &partial);
+        write(dir.path(), "results/notes.txt", "ignored");
+        dir
+    }
+
+    #[test]
+    fn a_run_directory_is_scored_with_anchor_first_then_baselines_then_the_rest() {
+        let dir = run_directory();
+        let board = score_dir(dir.path(), false).expect("scored");
+        let names: Vec<&str> = board.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["anchor", "baseline-fulltext", "alpha", "zeta"]);
+
+        let anchor = &board[0].1;
+        assert_eq!(anchor["all"].questions, 3);
+        assert!((anchor["all"].context_recall - 1.0).abs() < 1e-9);
+        assert_eq!(anchor["all"].answer_recall, Some(1.0));
+        assert_eq!(anchor["ownership"].questions, 2);
+        assert_eq!(anchor["justification"].questions, 1);
+        assert!(
+            !anchor.contains_key("ownership/direct"),
+            "no per-kind rows without `kinds`"
+        );
+
+        let partial = &board[1].1;
+        assert_eq!(
+            partial["all"].questions, 3,
+            "unanswered questions still count"
+        );
+        assert!((partial["all"].context_recall - 1.0 / 3.0).abs() < 1e-9);
+        assert_eq!(
+            partial["all"].answer_recall, None,
+            "no system answers, so no own-answer score"
+        );
+    }
+
+    #[test]
+    fn per_kind_rows_appear_only_when_asked_for() {
+        let dir = run_directory();
+        let with = score_dir(dir.path(), true).expect("scored");
+        let rows = &with[0].1;
+        assert_eq!(rows["ownership/direct"].questions, 2);
+        assert_eq!(rows["justification/dismissed"].questions, 1);
+    }
+
+    #[test]
+    fn a_stale_answer_that_leads_the_context_is_not_safe() {
+        let dir = run_directory();
+        let board = score_dir(dir.path(), false).expect("scored");
+        let partial = &board[1].1;
+        assert_eq!(partial["all"].stale_questions, 1);
+        assert!(
+            partial["all"].stale_context_safe.abs() < 1e-9,
+            "legacy team appears before core team"
+        );
+        assert!((board[0].1["all"].stale_context_safe - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unreadable_run_directories_are_errors_not_empty_scoreboards() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(score_dir(dir.path(), false).is_err(), "no questions.jsonl");
+        write(dir.path(), "questions.jsonl", "");
+        assert!(
+            score_dir(dir.path(), false).is_err(),
+            "no results directory"
+        );
+        write(dir.path(), "results/anchor.jsonl", "{ not json\n");
+        assert!(
+            score_dir(dir.path(), false).is_err(),
+            "malformed results line"
+        );
+        write(dir.path(), "results/anchor.jsonl", "");
+        let board = score_dir(dir.path(), false).expect("empty but valid");
+        assert!(board[0].1.is_empty());
+    }
+
+    #[test]
+    fn footprints_are_read_from_meta_files_and_anchor_sorts_first() {
+        let dir = run_directory();
+        write(
+            dir.path(),
+            "results/zeta.meta.json",
+            r#"{"index_bytes": 2500000, "note": "separate model server"}"#,
+        );
+        write(
+            dir.path(),
+            "results/anchor.meta.json",
+            r#"{"index_bytes": 1500000, "peak_rss_bytes": 300000000, "index_seconds": 12.34}"#,
+        );
+        let rows = footprints(dir.path()).expect("footprints");
+        let names: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["anchor", "zeta"],
+            "systems without a meta file are not listed"
+        );
+        assert_eq!(rows[0].1.index_bytes, Some(1_500_000));
+        assert_eq!(rows[1].1.peak_rss_bytes, None, "absent fields default");
+
+        let table = render_footprints(&rows);
+        assert!(table.contains("index MB"), "{table}");
+        let anchor_row = table
+            .lines()
+            .find(|l| l.starts_with("anchor"))
+            .expect("anchor row");
+        assert!(
+            anchor_row.contains("1.5")
+                && anchor_row.contains("300.0")
+                && anchor_row.contains("12.3")
+        );
+        let zeta_row = table
+            .lines()
+            .find(|l| l.starts_with("zeta"))
+            .expect("zeta row");
+        assert!(zeta_row.contains("separate model server") && zeta_row.contains('-'));
+        assert_eq!(render_footprints(&[]), "");
+
+        write(dir.path(), "results/bad.meta.json", "nope");
+        assert!(footprints(dir.path()).is_err());
+    }
+
+    #[test]
+    fn the_scoreboard_names_every_system_category_and_metric_group() {
+        let dir = run_directory();
+        let board = score_dir(dir.path(), false).expect("scored");
+        let text = render(&board);
+        for expected in [
+            "justification (1 questions",
+            "ownership (2 questions",
+            "all (3 questions",
+            "system",
+            "anchor",
+            "baseline-fulltext",
+            "ranking metrics",
+            "hit-rate",
+            "conflicting sources (1 questions with a stale claim)",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+        }
+        // A system with no answers of its own shows a dash, not a zero.
+        let row = text
+            .lines()
+            .find(|l| l.starts_with("baseline-fulltext"))
+            .expect("row");
+        assert!(row.contains(" - "), "{row}");
+        // Categories are listed alphabetically with the overall table last.
+        assert!(text.find("justification (").expect("j") < text.find("ownership (").expect("o"));
+        assert!(text.find("ownership (").expect("o") < text.find("all (").expect("a"));
+        let empty = render(&[]);
+        assert!(empty.contains("ranking metrics") && !empty.contains("ownership ("));
+    }
+
+    #[test]
+    fn a_generated_answer_sample_is_announced_in_the_table_header() {
+        let q = question(&[&["core team"]], &[], false);
+        let mut r = result(&["core team"], Some("core team"));
+        r.answer = Some("core team".into());
+        let board = vec![("anchor".to_owned(), score(&[q], &[r], false))];
+        let text = render(&board);
+        assert!(text.contains("gen-ans on a sample of 1"), "{text}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn normalize_is_idempotent_and_padded(text in ".{0,200}") {
+            let once = normalize(&text);
+            proptest::prop_assert!(once.starts_with(' '));
+            proptest::prop_assert_eq!(normalize(&once), once.clone());
+            proptest::prop_assert!(!once.contains("  "));
+        }
+
+        #[test]
+        fn scores_stay_within_their_ranges_for_any_contexts(
+            contexts in proptest::collection::vec(".{0,120}", 0..8),
+            generated in proptest::option::of(".{0,60}"),
+        ) {
+            let q = question(&[&["core team"], &["bob"]], &[&["legacy team"]], false);
+            let r = SystemResult {
+                id: "q".into(),
+                contexts,
+                answer: None,
+                generated_answer: generated,
+                latency_ms: 1.0,
+            };
+            let all = score(&[q], &[r], true).remove("all").expect("all row");
+            for value in [
+                all.context_recall, all.context_complete, all.hit_rate, all.mrr,
+                all.precision, all.ndcg, all.context_precision, all.stale_context_safe,
+            ] {
+                proptest::prop_assert!((0.0..=1.0 + 1e-9).contains(&value), "{value}");
+            }
+        }
+    }
 }

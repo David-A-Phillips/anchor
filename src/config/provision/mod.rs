@@ -29,6 +29,8 @@ mod install;
 mod process;
 #[doc(hidden)]
 pub mod testing;
+crate::base::opaque_debug!(OllamaManager);
+
 #[cfg(test)]
 mod tests;
 

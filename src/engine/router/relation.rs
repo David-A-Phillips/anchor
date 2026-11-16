@@ -253,7 +253,7 @@ fn unquoted(query: &str) -> String {
     for ch in query.chars() {
         match (open, ch) {
             (None, '"' | '`' | '\u{201c}') => {
-                open = Some(if ch == '\u{201c}' { '\u{201d}' } else { ch })
+                open = Some(if ch == '\u{201c}' { '\u{201d}' } else { ch });
             }
             (Some(close), _) if ch == close => {
                 open = None;

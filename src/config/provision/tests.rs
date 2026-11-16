@@ -289,7 +289,7 @@ async fn rig_with_archive(archive: Vec<u8>, listing: Option<String>) -> std::io:
     if let Some(listing) = listing {
         files.insert("sha256sum.txt".to_owned(), listing.into_bytes());
     }
-    TestRig::with_downloads(FakeDownloadServer::start(files).await?).await
+    TestRig::with_downloads(FakeDownloadServer::start(files).await?)
 }
 
 #[tokio::test]

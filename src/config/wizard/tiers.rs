@@ -40,7 +40,7 @@ impl Session<'_> {
         })
     }
 
-    pub(super) async fn configure_system2(&mut self) -> Step {
+    pub(super) fn configure_system2(&mut self) -> Step {
         if let Some(preset) = self.opts.system2.clone() {
             self.config.models.system2 = preset;
             return Ok(());
@@ -211,7 +211,7 @@ impl Session<'_> {
                 0 => {}
                 1 => match tier {
                     ModelTier::System1 => self.configure_system1().await?,
-                    ModelTier::System2 => self.configure_system2().await?,
+                    ModelTier::System2 => self.configure_system2()?,
                 },
                 _ => {
                     self.tier_mut(tier).provider = ProviderKind::Disabled;

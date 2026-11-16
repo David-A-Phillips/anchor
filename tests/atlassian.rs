@@ -960,3 +960,66 @@ async fn the_real_ingesters_read_the_export() {
         "blocking link survived the export"
     );
 }
+
+/// The daemon's refresh body: export, then re-scan the sources reading the export directory.
+#[tokio::test]
+async fn a_refresh_exports_and_rescans_the_sources_that_read_the_export() {
+    let site = site(AtlassianDeployment::DataCenter).await;
+    let (wiki_dir, data) = (site.options.wiki_dir(), site._dir.path().join("data"));
+    let engine = tokio::task::spawn_blocking(move || {
+        let mut config = AnchorConfig {
+            data_dir: Some(data),
+            ..AnchorConfig::default()
+        };
+        config.models.system1.provider = ProviderKind::Disabled;
+        config
+            .sources
+            .push(source("wiki", SourceKind::Wiki, &wiki_dir));
+        Engine::open(config).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(engine.store().stats().unwrap().node_count, 0);
+
+    let report = anchor::cli::atlassian::refresh_once(&engine, &site.options, &site.sleeper)
+        .await
+        .unwrap();
+    assert_eq!(report.pages, 2, "{report:?}");
+    let wiki = anchor::base::SourceId::new("wiki");
+    assert!(
+        engine
+            .store()
+            .node_by_key(&keys::wiki_page(&wiki, "100"))
+            .unwrap()
+            .is_some(),
+        "the exported page was ingested by the refresh itself"
+    );
+
+    // A second refresh finds nothing new and is still fine.
+    let again = anchor::cli::atlassian::refresh_once(&engine, &site.options, &site.sleeper)
+        .await
+        .unwrap();
+    assert_eq!(again.pages + again.issues + again.removed, 0, "{again:?}");
+}
+
+#[tokio::test]
+async fn a_refresh_against_a_server_that_rejects_the_credentials_fails_and_ingests_nothing() {
+    let mut site = site(AtlassianDeployment::DataCenter).await;
+    site.options.credentials = Credentials::Bearer {
+        token: "wrong".into(),
+    };
+    let data = site._dir.path().join("data");
+    let engine = tokio::task::spawn_blocking(move || {
+        let mut config = AnchorConfig {
+            data_dir: Some(data),
+            ..AnchorConfig::default()
+        };
+        config.models.system1.provider = ProviderKind::Disabled;
+        Engine::open(config).unwrap()
+    })
+    .await
+    .unwrap();
+    let result = anchor::cli::atlassian::refresh_once(&engine, &site.options, &site.sleeper).await;
+    assert!(result.is_err());
+    assert_eq!(engine.store().stats().unwrap().node_count, 0);
+}

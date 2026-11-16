@@ -75,17 +75,17 @@ pub struct OwnershipQuestion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JustificationKind {
-    /// "Why is <ticket> blocked?"
+    /// "Why is `<ticket>` blocked?"
     TicketBlocked,
-    /// "Why is <API> not approved?"
+    /// "Why is `<API>` not approved?"
     ApiNotApproved,
-    /// "Why is <endpoint> blocked?"
+    /// "Why is `<endpoint>` blocked?"
     EndpointBlocked,
-    /// "What is blocking <pull request>?"
+    /// "What is blocking `<pull request>`?"
     PullRequestBlocked,
-    /// "Why was the review on <pull request> dismissed?"
+    /// "Why was the review on `<pull request>` dismissed?"
     ReviewDismissed,
-    /// "Why was the suggestion on <page> dismissed?"
+    /// "Why was the suggestion on `<page>` dismissed?"
     ThreadDismissed,
 }
 
@@ -124,13 +124,13 @@ pub struct JustificationQuestion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipKind {
-    /// "Which portfolio does <service> belong to?"
+    /// "Which portfolio does `<service>` belong to?"
     ServicePortfolio,
-    /// "Who leads the team that owns the component containing <service>?"
+    /// "Who leads the team that owns the component containing `<service>`?"
     ServiceTeamLead,
-    /// "Which services consume <API>?"
+    /// "Which services consume `<API>`?"
     ApiConsumers,
-    /// "Which domain owns the code that implements <endpoint>?"
+    /// "Which domain owns the code that implements `<endpoint>`?"
     EndpointDomain,
 }
 

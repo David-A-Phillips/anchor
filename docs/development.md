@@ -56,9 +56,6 @@ because the reason is usually returned on the answer rather than as a separate c
   question names the service.
 - Context precision is low (about 0.2 for ownership): the context includes neighbouring evidence
   beyond the answer.
-- One provisioning test (`a_system_binary_is_preferred_over_downloading`) failed once in a full
-  parallel run and passed on every re-run; it is probably a port race in the test fakes.
-
 - Two graph nodes that already exist are not merged retroactively when a later source reveals
   they are the same entity; `GraphStore::rebuild` re-materialises the graph and heals this.
 - Wiki prose is linked to entities it mentions, but ownership stated only in prose is not turned

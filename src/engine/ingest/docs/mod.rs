@@ -11,7 +11,7 @@
 //! * one Text chunk per section piece (heading path on the first line, at most about
 //!   [`text::DEFAULT_CHUNK_CHARS`] bytes, split at paragraph boundaries);
 //! * `Mentions` edges for every candidate entity found in the text
-//!   ([`mentions::mention_edges`](super::mentions::mention_edges)), and for links to other files:
+//!   ([`mentions::mention_edges`]), and for links to other files:
 //!   relative Markdown/RST links resolve against the file's directory and look up a File by its
 //!   path; Sphinx `:doc:` references and toctree entries look up a File by its path without
 //!   extension (weight 0.9, scoped to the same source).

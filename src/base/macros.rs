@@ -68,3 +68,27 @@ macro_rules! string_enum {
 }
 
 pub(crate) use string_enum;
+
+/// Implements `Debug` for handle types that own runtime resources (connections, locks, callbacks,
+/// credentials), printing only the type name. Keeps secrets out of logs and `{:?}` output while
+/// letting the types sit inside `Debug`-deriving structs. Lifetime parameters are declared before
+/// the type, after an `@`: `opaque_debug!(Plain, @'a; Borrowing<'a>)`.
+macro_rules! opaque_debug {
+    ($($(@ $($lt:lifetime),+ ;)? $ty:ty),+ $(,)?) => {
+        $(
+            impl$(<$($lt),+>)? ::std::fmt::Debug for $ty {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    let name = ::std::any::type_name::<Self>();
+                    let short = name
+                        .split('<')
+                        .next()
+                        .and_then(|path| path.rsplit("::").next())
+                        .unwrap_or(name);
+                    f.debug_struct(short).finish_non_exhaustive()
+                }
+            }
+        )+
+    };
+}
+
+pub(crate) use opaque_debug;

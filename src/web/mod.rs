@@ -289,27 +289,54 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("index.html"))
 }
 
-/// Rejects requests addressed to a non-loopback host name: a page on another origin must not be
-/// able to reach the dashboard by pointing a DNS name at 127.0.0.1.
+/// Whether `authority` (`host`, `host:port`, `[v6]` or `[v6]:port`) names this machine. Host names
+/// are case-insensitive and may carry a trailing root dot.
+fn is_loopback_authority(authority: &str) -> bool {
+    let name = authority
+        .rsplit_once(':')
+        .map_or(authority, |(name, port)| {
+            if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+                name
+            } else {
+                authority
+            }
+        });
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    matches!(name.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "")
+}
+
+/// Whether an `Origin` header value (`scheme://authority`) is a loopback origin. `null` (sandboxed
+/// frames, some redirects) and anything unparseable are not.
+fn is_loopback_origin(origin: &str) -> bool {
+    origin.split_once("://").is_some_and(|(scheme, authority)| {
+        matches!(scheme, "http" | "https")
+            && !authority.is_empty()
+            && !authority.contains('/')
+            && is_loopback_authority(authority)
+    })
+}
+
+/// Rejects requests addressed to a non-loopback host name (a page on another origin must not be
+/// able to reach the dashboard by pointing a DNS name at 127.0.0.1) and requests that a page on
+/// another origin sent to the loopback address itself (the `Origin` header, which browsers always
+/// attach to cross-origin writes, must be loopback when present: the state-changing endpoints
+/// would otherwise be open to cross-site request forgery from any web page the user visits).
 async fn loopback_only(request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let name = host.rsplit_once(':').map_or(host, |(name, port)| {
-        if port.chars().all(|c| c.is_ascii_digit()) {
-            name
-        } else {
-            host
-        }
-    });
-    if matches!(name, "localhost" | "127.0.0.1" | "[::1]" | "") {
+    let origin_ok = request
+        .headers()
+        .get(header::ORIGIN)
+        .is_none_or(|origin| origin.to_str().is_ok_and(is_loopback_origin));
+    if is_loopback_authority(host) && origin_ok {
         next.run(request).await
     } else {
         ApiError(
             StatusCode::FORBIDDEN,
-            "the dashboard only answers on loopback host names".into(),
+            "the dashboard only answers loopback host names and loopback origins".into(),
         )
         .into_response()
     }
@@ -342,3 +369,5 @@ pub async fn serve(engine: Arc<Engine>, query: QueryEngine) -> Result<()> {
     axum::serve(listener, router(WebState { engine, query })).await?;
     Ok(())
 }
+
+crate::base::opaque_debug!(WebState);

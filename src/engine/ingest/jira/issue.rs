@@ -381,7 +381,7 @@ pub(super) fn build_issue(
         node = node.attr("fix_versions", fix_versions);
     }
     if status_blocked || custom.blocked {
-        let reason = custom.reason.clone().or_else(|| {
+        let reason = custom.reason.or_else(|| {
             if blockers.is_empty() {
                 status
                     .as_deref()

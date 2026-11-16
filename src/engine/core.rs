@@ -22,8 +22,9 @@ use super::router::TieredRouter;
 use super::store::{ApplyOutcome, GraphStore};
 use crate::backlog::Backlog;
 use crate::base::{
-    ChunkId, DeviceId, EdgeAssertion, EdgeKind, Embedder, Error, HlcClock, NodeAssertion, NodeKind,
-    Result, SourceId, SourceKind, Unit, UnitKey, UnitKind, UnitVersion, attrs, keys,
+    ChunkId, ContentHash, DeviceId, EdgeAssertion, EdgeKind, Embedder, Error, HlcClock,
+    NodeAssertion, NodeKind, Result, SourceId, SourceKind, Unit, UnitKey, UnitKind, UnitVersion,
+    attrs, keys,
 };
 use crate::config::{AnchorConfig, AnchorPaths, Depth, SourceConfig};
 use crate::metrics::{PriceTable, TokenLedger};
@@ -142,7 +143,7 @@ impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
             .field("data_dir", &self.paths.root())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -209,7 +210,7 @@ impl Engine {
         )?);
         let router = TieredRouter::from_config(&config.models, ledger.clone(), &process_env)?
             .with_spend_tracker(Arc::new(LedgerSpend(ledger.clone())));
-        let backlog = Arc::new(Backlog::new(db.clone(), &config.backlog));
+        let backlog = Arc::new(Backlog::new(db, &config.backlog));
         let (events, _) = broadcast::channel(1024);
 
         Ok(Arc::new(Self {
@@ -467,6 +468,24 @@ impl Engine {
         if ids.is_empty() {
             return Ok(0);
         }
+        match self.embed_chunks(ids.clone()).await {
+            Ok((embedded, retry)) => {
+                self.pending_chunks.lock().extend(retry);
+                Ok(embedded)
+            }
+            Err(err) => {
+                // The store failed (a full disk, a locked database): keep every chunk queued so
+                // the next pass retries them instead of forgetting them until the next scan.
+                self.pending_chunks.lock().extend(ids);
+                Err(err)
+            }
+        }
+    }
+
+    /// Embeds `ids`; returns how many were embedded and which chunks failed in a way that is worth
+    /// retrying (the embedder was unreachable or answered badly). Blank chunks can never embed
+    /// and are not retried.
+    async fn embed_chunks(&self, ids: Vec<ChunkId>) -> Result<(usize, Vec<ChunkId>)> {
         let store = self.store.clone();
         let embed_code = self.config.embeddings.embed_code;
         let chunks = tokio::task::spawn_blocking(move || -> Result<Vec<_>> {
@@ -481,6 +500,11 @@ impl Engine {
             Ok(out)
         })
         .await??;
+        let candidates: Vec<(ChunkId, ContentHash)> = chunks
+            .iter()
+            .filter(|(_, _, text)| !text.trim().is_empty())
+            .map(|(id, hash, _)| (*id, *hash))
+            .collect();
         let report = index_chunks(
             self.embedder.as_ref(),
             &self.vectors,
@@ -488,7 +512,20 @@ impl Engine {
             self.config.embeddings.batch_size.max(1),
         )
         .await?;
-        Ok(report.embedded)
+        let mut retry = Vec::new();
+        if report.failed > 0 {
+            tracing::warn!(
+                failed = report.failed,
+                "embedding failed for some chunks, will retry: {}",
+                report.first_error.as_deref().unwrap_or("unknown error")
+            );
+            retry = candidates
+                .into_iter()
+                .filter(|(id, hash)| !self.vectors.contains(*id, hash))
+                .map(|(id, _)| id)
+                .collect();
+        }
+        Ok((report.embedded, retry))
     }
 
     /// Change-to-graph latency percentiles over the most recent file changes.
@@ -559,7 +596,7 @@ impl Engine {
             // Derived facts are produced by `enrich`, not by scanning anything.
             SourceKind::Derived => complete = false,
             SourceKind::Repo => {
-                complete = self.scan_repo(source, &root, &mut report, &mut produced)?
+                complete = self.scan_repo(source, &root, &mut report, &mut produced)?;
             }
             SourceKind::Wiki => self.apply_output(
                 wiki::scan_wiki(&root, id, &Default::default())?,
@@ -718,7 +755,19 @@ impl Engine {
     ) -> (Option<Arc<OwnershipRules>>, Vec<Unit>) {
         let mut units = Vec::new();
         let mut rules = None;
-        let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+        // A file that cannot be read is reported rather than silently treated as empty (which
+        // would drop the repository's ownership rules); invalid UTF-8 is tolerated.
+        let read_warnings = std::cell::RefCell::new(Vec::<String>::new());
+        let read = |path: &Path| match std::fs::read(path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(err) => {
+                read_warnings.borrow_mut().push(format!(
+                    "{}: cannot read ownership file: {err}",
+                    path.display()
+                ));
+                String::new()
+            }
+        };
         let kinds: Vec<(&(PathBuf, String), OwnershipFileKind)> = files
             .iter()
             .filter_map(|file| ownership_file_kind(&file.1).map(|kind| (file, kind)))
@@ -755,6 +804,7 @@ impl Engine {
         } else {
             None
         };
+        report.warnings.append(&mut read_warnings.borrow_mut());
         let _ = root;
         if let Some((rel, result)) = parsed {
             match result {
@@ -1140,5 +1190,86 @@ impl Engine {
     /// Flushes buffered state (the token ledger) to disk.
     pub fn flush(&self) -> Result<()> {
         self.ledger.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::base::{EmbedKind, Embedder, Error, SourceKind};
+    use crate::config::SourceConfig;
+    use crate::engine::router::ProviderKind;
+
+    /// An embedder that fails until told otherwise, then behaves like the hash embedder.
+    struct Flaky {
+        inner: HashEmbedder,
+        failing: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl Embedder for Flaky {
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+        async fn embed(&self, texts: &[String], kind: EmbedKind) -> Result<Vec<Vec<f32>>> {
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(Error::other("embedder is down"));
+            }
+            self.inner.embed(texts, kind).await
+        }
+    }
+
+    #[tokio::test]
+    async fn chunks_whose_embedding_failed_are_retried_by_the_next_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).expect("docs");
+        std::fs::write(
+            docs.join("a.md"),
+            "# Retries\n\nCharges are retried three times.\n",
+        )
+        .expect("page");
+        let mut config = AnchorConfig {
+            data_dir: Some(dir.path().join("data")),
+            ..AnchorConfig::default()
+        };
+        config.models.system1.provider = ProviderKind::Disabled;
+        config.sources.push(SourceConfig::new(
+            "docs",
+            SourceKind::Wiki,
+            docs.to_string_lossy(),
+        ));
+        let mut engine = Engine::open(config).expect("engine");
+        let dimensions = engine.embedder().dimensions();
+        let flaky = Arc::new(Flaky {
+            inner: HashEmbedder::new(dimensions).expect("hash embedder"),
+            failing: std::sync::atomic::AtomicBool::new(true),
+        });
+        // `Arc::get_mut`: nothing else holds the engine yet.
+        Arc::get_mut(&mut engine).expect("unique").embedder = flaky.clone();
+        engine.scan_all().expect("scan");
+        let queued = engine.pending_chunks.lock().len();
+        assert!(queued > 0, "the scan queued chunks");
+
+        assert_eq!(engine.embed_pending().await.expect("pass completes"), 0);
+        assert_eq!(engine.vectors().len(), 0);
+        assert_eq!(
+            engine.pending_chunks.lock().len(),
+            queued,
+            "the failed chunks stay queued"
+        );
+
+        flaky
+            .failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(engine.embed_pending().await.expect("recovered") > 0);
+        assert!(!engine.vectors().is_empty());
+        assert!(engine.pending_chunks.lock().is_empty());
+        assert_eq!(engine.embed_pending().await.expect("idle"), 0);
     }
 }

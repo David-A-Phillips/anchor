@@ -656,3 +656,5 @@ impl McpServer {
         .await
     }
 }
+
+crate::base::opaque_debug!(McpServer);

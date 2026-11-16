@@ -175,3 +175,5 @@ pub fn provider_name(provider: ProviderKind) -> &'static str {
         ProviderKind::Disabled => "disabled",
     }
 }
+
+crate::base::opaque_debug!(ModelValidator);

@@ -33,7 +33,7 @@ use crate::base::time::parse_timestamp_ms;
 use crate::base::{Error, Result};
 use crate::config::{AnchorPaths, AtlassianConfig, AtlassianDeployment};
 
-pub use command::{FetchAtlassianArgs, run_command, spawn_refreshers};
+pub use command::{FetchAtlassianArgs, refresh_once, run_command, spawn_refreshers};
 pub use http::{Credentials, RetryPolicy, Sleeper, TokioSleeper};
 
 /// Incremental queries start this long before the recorded high-water mark. CQL and JQL compare

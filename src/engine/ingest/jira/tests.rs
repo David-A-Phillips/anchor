@@ -26,8 +26,7 @@ fn ticket_attr<'a>(unit: &'a Unit, key: &str, attr: &str) -> Option<&'a Value> {
     let ticket = keys::ticket(key);
     unit.nodes
         .iter()
-        .find(|node| node.key == ticket)
-        .unwrap()
+        .find(|node| node.key == ticket)?
         .attrs
         .get(attr)
 }

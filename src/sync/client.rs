@@ -691,3 +691,5 @@ impl Peer for GrpcPeer {
         }
     }
 }
+
+crate::base::opaque_debug!(ClientOptions, SyncClient);
