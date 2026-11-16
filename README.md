@@ -1,149 +1,78 @@
 # Anchor
 
-A local-first context engine and synchronisation daemon. Anchor watches your repositories and
-ingests wikis (including comment threads and dismissed discussions), API approval portals, Jira
-exports, code-review exports and an organisation model into one entity-relationship graph, then
-answers questions such as "Who owns API X?" or "Why is this blocked?" against it.
+Anchor builds one graph out of your repositories, wikis, trackers, code reviews, API approvals
+and organisation chart, and answers questions against it: who owns this, why was that blocked,
+what depends on what, and why is this line of code the way it is.
 
-Every source has an explicit trust level. `source_of_truth` sources (code, CODEOWNERS, approved
-API definitions, the org model) always win a conflict against `reference_only` sources (wikis,
-tickets, review threads), which are used only as contextual fallback.
+- **Local first.** One binary and a SQLite file. No server, no model and no network are needed
+  to ingest and answer.
+- **Trust aware.** Every source is `source_of_truth` (code, CODEOWNERS, approved API definitions,
+  the org model) or `reference_only` (wikis, tickets, review threads). When they disagree the
+  authoritative source wins and the answer says so.
+- **Fast.** Questions are classified by rules and answered from the graph in about 6 ms. Models
+  are optional and never on the path of an ordinary question.
+- **Made for agents.** A Model Context Protocol server gives Claude Code, Cursor and other hosts
+  the same answers, with evidence and trust levels.
+- **Shareable.** A team server syncs the graph between machines; each machine holds each source
+  only as deep as it needs.
 
-Design details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+On a 735-question benchmark over a 100-repository synthetic organisation, a reader model given
+Anchor's context answered 85% correctly, against 49% with the best LlamaIndex configuration, at
+a fraction of the tokens and indexing time. The corpus is synthetic and favours Anchor's
+question types; see [docs/benchmarks.md](docs/benchmarks.md) for method, data and caveats.
 
-## Requirements
+## Contents
 
-- Rust 1.88 or newer and a C compiler. No OpenSSL headers, cmake or protoc are needed.
-- Linux is the tested platform. Managed Ollama installation is Linux-only; elsewhere install
-  Ollama yourself and set `ollama.base_url`.
-- No language model is required: without one, Anchor classifies questions with heuristics and
-  answers ownership and "why is it blocked" questions directly from the graph.
+- [Install](#install)
+- [Run it locally](#run-it-locally)
+- [Connect your data sources](#connect-your-data-sources)
+- [Models and third-party APIs](#models-and-third-party-apis)
+- [Use it from an agent](#using-anchor-from-an-agent-mcp)
+- [Host it for a team](#host-it-for-a-team)
+- [Commands](#commands)
+- [More documentation](#more-documentation)
 
-## Build
+## Install
+
+Packages for apt, dnf and Homebrew, an install script, a Docker image and building from source
+are described in [docs/install.md](docs/install.md). From source:
 
 ```sh
-cargo build --release          # binary at target/release/anchor
-cargo build --release --no-default-features   # without the Candle embedding backend
+cargo build --release          # binary at target/release/anchor; needs Rust 1.88+ and a C compiler
 ```
 
-## Quick start
+Linux x86_64 is the platform that has been built and tested. macOS and Windows builds are
+defined in the release workflow but have not run yet.
 
-```sh
-anchor init                    # writes a starter config (see "Configuration" for the location)
-$EDITOR ~/.config/anchor/anchor.toml          # add [[sources]]
-anchor ingest                  # scan every source into the graph
-anchor query "Who owns the payments-api service?"
-anchor daemon                  # initial scan + file watching + dashboard on http://localhost:7890
-```
+## Run it locally
 
-`anchor setup` runs the interactive wizard instead of editing the file by hand: it detects or
-installs Ollama, configures the two model tiers, validates their endpoints and walks through the
-sources and their trust levels.
-
-To try Anchor without connecting real systems, generate a synthetic enterprise:
+Try it on a generated organisation first; nothing else needs to be set up:
 
 ```sh
 anchor demo --out /tmp/anchor-demo
 anchor --config /tmp/anchor-demo/anchor.toml ingest
-anchor --config /tmp/anchor-demo/anchor.toml daemon
+anchor --config /tmp/anchor-demo/anchor.toml query "..."   # `anchor demo` prints a question to try
+anchor --config /tmp/anchor-demo/anchor.toml daemon      # dashboard on http://localhost:7890
 ```
 
-## Configuration
+On your own code:
+
+```sh
+anchor init                              # writes ~/.config/anchor/anchor.toml
+$EDITOR ~/.config/anchor/anchor.toml     # add [[sources]]; see the next section
+anchor ingest                            # scan every source into the graph
+anchor query "Who owns the payments-api service?"
+anchor why src/ledger/charge.rs:120      # the commits, review and ticket behind a line
+anchor daemon                            # keep the graph current as files change; serve the dashboard
+```
+
+`anchor setup` is an interactive wizard that does the same and can install a local model.
 
 The config file is `$ANCHOR_CONFIG`, else `$ANCHOR_HOME/anchor.toml`, else
-`~/.config/anchor/anchor.toml`. Pass `--config <file>` to any command to override it. Data (the
-SQLite database, device keys, managed Ollama, exported packs) lives in `data_dir`, default
-`~/.local/share/anchor`.
+`~/.config/anchor/anchor.toml`; `--config <file>` overrides it for one command. The database,
+device keys and exported packs live in `data_dir` (default `~/.local/share/anchor`).
 
-```toml
-mode = "standalone"            # standalone | client | server
-
-[[sources]]
-id = "payments-api"
-kind = "repo"                  # repo | wiki | api_portal | jira | org_model | code_review
-trust = "source_of_truth"      # source_of_truth | reference_only
-location = "/src/payments-api"
-
-[[sources]]
-id = "eng-wiki"
-kind = "wiki"
-trust = "reference_only"
-location = "/exports/wiki"
-
-[models.system1]               # fast local tier: intent parsing, classification, filtering
-provider = "ollama"            # ollama | disabled
-model = "llama3.2:3b"
-base_url = "http://127.0.0.1:11434"
-
-[models.system2]               # heavy tier: reasoning and synthesis (off until configured)
-provider = "anthropic"         # anthropic | openai_compatible | ollama | disabled
-model = "claude-opus-5-5"
-api_key_env = "ANTHROPIC_API_KEY"   # the NAME of the variable; keys are never stored
-
-[models.routing]
-allow_cloud = true
-max_cloud_usd_per_day = 5.0
-
-[web]
-bind = "127.0.0.1"
-port = 7890
-```
-
-Every section is optional. Default trust levels are `source_of_truth` for repositories, API
-portals and the org model, and `reference_only` for wikis, Jira and code reviews.
-
-### What each source kind reads
-
-| Kind | Location | Contents |
-|------|----------|----------|
-| `repo` | a checkout | Rust, Python, JavaScript, TypeScript/TSX, Go, Java and C sources; Markdown/RST docs; `CODEOWNERS`, `MAINTAINERS`, `OWNERS`; OpenAPI documents |
-| `wiki` | a directory | Markdown (with front matter) and HTML pages; comment threads from `<page>.comments.json` sidecars or embedded markup, including resolved and dismissed threads |
-| `api_portal` | a directory | API records with approvals, plus OpenAPI/Swagger definitions |
-| `jira` | a directory | issue JSON in Jira REST shape (single issues, arrays or search results) |
-| `org_model` | a file or directory | portfolios → domains → components → services, teams and people (YAML, JSON or TOML) |
-| `code_review` | a directory | one JSON file per pull request; `anchor fetch` exports them from GitHub |
-| `issues` | a directory | issue-board and discussion-board exports (GitHub issues and discussions), as written by `anchor fetch` |
-
-The exact accepted formats are documented at the top of each parser module under
-`src/engine/ingest/`.
-
-## Commands
-
-| Command | Purpose |
-|---------|---------|
-| `anchor setup` | Interactive setup wizard |
-| `anchor init [--force]` | Write a starter configuration |
-| `anchor ingest [--source ID]` | Scan sources into the graph (incremental) |
-| `anchor query "…" [--json] [--explain] [--local-only] [--retrieval-only]` | Ask a question (`--explain`: model-written prose) |
-| `anchor daemon [--no-web]` | Scan, watch files, serve the dashboard |
-| `anchor status` | Graph and source statistics |
-| `anchor spend [--days N]` | Token usage and estimated cost, local vs. cloud |
-| `anchor backlog` | Open gap-analysis items |
-| `anchor enrich [--limit N]` | Summarise and tag pages, tickets, PRs and APIs with the local model |
-| `anchor why TARGET [--json]` | Why is this code the way it is: blame, then commit → pull request → review → ticket → pages |
-| `anchor mcp` | Serve the Model Context Protocol on stdio, for agents (Claude Code, Cursor, …) |
-| `anchor mcp install [--client …] [--print]` | Register the MCP server with Claude Code, Claude Desktop or Cursor |
-| `anchor fetch-atlassian [URL]` | Export Confluence spaces and Jira projects (incremental; see `docs/atlassian.md`) |
-| `anchor eval --truth FILE` | Score the engine against questions with known answers |
-| `anchor compare DIR [--truth FILE] [--reindex] [--kinds]` | Score Anchor next to plain retrieval and other RAG systems: quality, latency, disk and memory |
-| `anchor fetch OWNER/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
-| `anchor deepen SOURCE [--depth map\|full]` | Ingest a source more deeply |
-| `anchor export [-o FILE]` / `anchor import FILE` | Write or merge a signed `.contextpack` |
-| `anchor server` / `anchor sync` | Run the central sync server / sync once against it |
-| `anchor ollama status\|provision\|teardown\|rebuild` | Manage the local Ollama backend |
-| `anchor demo --out DIR` | Generate a synthetic enterprise to try Anchor on |
-
-## Ollama
-
-`anchor ollama provision` uses the server at `ollama.base_url` if one answers. Otherwise it
-installs the official build into `data_dir/ollama` (user space, no sudo), starts it, pulls
-`ollama.default_model` and verifies a generation. An external server is never stopped or wiped.
-
-`anchor ollama rebuild` is the bootstrap resilience test: it wipes the managed installation and
-models, reinstalls, re-pulls and verifies, and prints per-phase timings. `--keep-binary` and
-`--keep-downloads` narrow what is wiped. `anchor ollama teardown` only removes.
-
-## Dashboard
+### Dashboard
 
 `anchor daemon` serves `http://localhost:7890` with: an overview (counts, sources and trust
 levels, change-to-graph latency), a graph explorer (search, node detail with provenance, trust-
@@ -156,7 +85,7 @@ JSON API: `/api/health`, `/api/stats`, `/api/graph/search?q=`, `/api/graph/node/
 `POST /api/backlog/{id}/{resolve|dismiss|reopen|retry}`, `/api/spend?days=`,
 `POST /api/sources/{id}/rescan`, `POST /api/export`.
 
-## Why is this code the way it is (`anchor why`)
+### Why is this code the way it is (`anchor why`)
 
 `anchor why` is a deeper git blame. It blames the lines you ask about, then follows each
 responsible commit through the graph and reports the whole trail:
@@ -197,22 +126,79 @@ max_files_per_commit = 30     # larger commits keep the count, not the file link
 For the trail to reach reviews and tickets, ingest them too: `anchor fetch OWNER/REPO` for GitHub
 pull requests, a `jira` source or `anchor fetch-atlassian` for tickets and wiki pages.
 
-## Confluence and Jira
+## Connect your data sources
 
-`anchor fetch-atlassian` exports Confluence spaces (pages, labels, hierarchy, footer and inline
-comments with their resolution) and Jira projects into the layouts the `wiki` and `jira` sources
-read, incrementally and resumably, for Cloud and Data Center. Pages with read restrictions are
-skipped unless you opt in. Credentials come from environment variables, never from the file.
-See [`docs/atlassian.md`](docs/atlassian.md). The connector is tested against a mock of the
-Atlassian APIs only; it has not been run against a real site yet.
+Each source is one `[[sources]]` entry with a kind, a location and a trust level. Local
+directories are read in place; third-party systems are exported into a directory first by a
+fetch command, which the daemon can repeat on a schedule.
 
-## Installing and sharing
+| System | How it gets in | Source kind | Default trust |
+|---|---|---|---|
+| Local repositories | Read in place and watched for changes. Code in Rust, Python, JavaScript, TypeScript, Go, Java and C; docs; `CODEOWNERS`; OpenAPI files; recent git history | `repo` | source of truth |
+| GitHub issues, discussions and pull-request reviews | `anchor fetch OWNER/REPO` (uses your `gh` login), or a `[[github]]` entry the daemon refreshes | `issues`, `code_review` | reference only |
+| Confluence | `anchor fetch-atlassian`, or an `[[atlassian]]` entry; Cloud and Data Center | `wiki` | reference only |
+| Jira | `anchor fetch-atlassian`, or issue JSON you export yourself | `jira` | reference only |
+| Other wikis | A directory of Markdown or HTML pages, with comment threads in sidecar files | `wiki` | reference only |
+| API approval portal | A directory of API records, approvals and OpenAPI definitions | `api_portal` | source of truth |
+| Organisation chart | A YAML, JSON or TOML file: portfolios, domains, components, services, teams, people | `org_model` | source of truth |
 
-[`docs/install.md`](docs/install.md) covers the install script, the Docker image for a team
-sync server, `anchor mcp install`, and sharing a graph with a teammate (server URL and token, or
-a `.contextpack` file). Release builds for Linux, macOS and Windows are defined in
-`.github/workflows/release.yml`; they have not run yet, and only Linux x86_64 has been built
-and tested.
+```toml
+[[sources]]
+id = "payments-api"
+kind = "repo"
+trust = "source_of_truth"
+location = "/src/payments-api"
+depth = "full"                 # phone_book | map | full: how much of it to hold
+
+[[github]]                     # keep a repository's issues and reviews exported
+repository = "acme/payments-api"
+interval_minutes = 60
+
+[[atlassian]]                  # keep Confluence spaces and Jira projects exported
+base_url = "https://acme.atlassian.net"
+deployment = "cloud"
+email_env = "ATLASSIAN_EMAIL"  # names of environment variables; secrets are never stored
+token_env = "ATLASSIAN_TOKEN"
+confluence_spaces = ["ENG"]
+jira_projects = ["PAY"]
+interval_minutes = 60
+```
+
+After a fetch, add the `[[sources]]` entries the command prints. Details, file formats, depth
+levels and database size are in [docs/data-sources.md](docs/data-sources.md); the Atlassian
+connector has its own page, [docs/atlassian.md](docs/atlassian.md). It has been tested against a
+mock of the Atlassian APIs only, not yet against a real site.
+
+## Models and third-party APIs
+
+No model is required. Add them when you want written explanations (`anchor query --explain`) or
+tagging at ingestion.
+
+```toml
+[models.system1]               # small and fast: classification fallback, tagging at ingestion
+provider = "ollama"            # ollama | anthropic | openai_compatible | disabled
+model = "llama3.2:3b"
+
+[models.system2]               # larger: written explanations, only when asked
+provider = "anthropic"
+model = "claude-opus-5-5"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[models.routing]
+allow_cloud = true
+max_cloud_usd_per_day = 5.0
+```
+
+- **Local:** `anchor ollama provision` installs and starts Ollama in your data directory and
+  pulls a model (Linux; elsewhere install Ollama yourself and set `base_url`).
+- **Anthropic:** set `provider = "anthropic"` and the name of the variable holding your key.
+- **OpenAI and compatible gateways** (Azure OpenAI, OpenRouter, vLLM, LM Studio): set
+  `provider = "openai_compatible"`, `base_url` and `api_key_env`.
+
+A cloud model receives the question and the evidence retrieved for it, nothing else.
+`anchor spend` reports tokens and estimated cost per tier. Provider details, cost controls and
+what each tier does are in [docs/models.md](docs/models.md). Only the Ollama provider has been
+run against a real server so far.
 
 ## Using Anchor from an agent (MCP)
 
@@ -250,317 +236,70 @@ name. Tool failures come back as tool errors (`isError`), so the agent can corre
 Protocol revisions 2024-11-05, 2025-03-26 and 2025-06-18 are supported. For hosts that do not
 speak MCP, `anchor query --json` and the dashboard's `POST /api/query` return the same data.
 
-## Client/server sync
+## Host it for a team
 
-Run `anchor server` on a central machine (`sync.listen`, default `0.0.0.0:7891`). On each client
-set `mode = "client"`, `sync.server_url`, and which sources to `publish` and `subscribe` to, then
-run `anchor sync` (or the daemon). Devices exchange signed `.contextpack` deltas; merging is last-
-writer-wins per unit, and locally configured trust levels are never overridden by a peer. Set
-`sync.auth_token_env` on both sides to require a bearer token.
-
-## Testing
+One machine runs the sync server; everyone else points at it.
 
 ```sh
-cargo test --all-features                          # everything hermetic (no network)
-cargo test --all-features --test performance -- --nocapture   # budgets, with measurements
-cargo clippy --all-targets --all-features -- -D warnings
+# server
+docker build -t anchor . && docker run -d -p 7891:7891 -v anchor-data:/data \
+    -e ANCHOR_SYNC_TOKEN=<long random string> anchor
 ```
-
-The performance suite asserts: file change → graph mutation p95 under 50 ms, idle CPU ~0 %,
-resident memory under 3 GB during 2,000 concurrent queries, and projects the SQLite and
-`.contextpack` footprint to 1,000 repositories.
-
-Opt-in tests that need the network:
-
-```sh
-ANCHOR_E2E_OLLAMA=1 cargo test --all-features e2e_real_ollama -- --ignored --nocapture
-```
-
-downloads the real Ollama build (~1.5 GB) into `target/tmp`, pulls a tiny model, generates, tears
-down, rebuilds and verifies again.
-
-`scripts/fetch-corpus.sh` fetches a real-world corpus (Linux, Kubernetes, Grafana, exported pull-
-request reviews) into `./corpus` for scale testing.
-
-## What the models do
-
-Models stay off the interactive path. Questions are classified by rules in microseconds and
-answered straight from the graph; nothing waits on a model unless you ask for prose.
-
-| Where | What the model does | When |
-|-------|---------------------|------|
-| Classification | The local System 1 model reads a question only when the rules cannot classify it (multi-hop "who leads the team that owns…" questions). Its reading is cached, so a repeated question is instant. | At question time, as a fallback |
-| Answers | `anchor query --explain` (or `query.model_answers = true`) has a model write a prose answer from the retrieved evidence. | Only on request |
-| Enrichment | `anchor enrich` has System 1 summarise and tag wiki pages, tickets, pull requests and APIs, and name the entities they are about. Tags become searchable aliases; named entities become links. Stored as a `reference_only` source, so it never overrides an authoritative fact. | In the background, after ingestion (the daemon does it automatically) |
-
-Models are never used to search the graph.
-
-To measure what they change, generate a question set with known answers and score it with and
-without a model configured:
-
-```sh
-anchor demo --out /tmp/demo --scale small
-anchor --config /tmp/demo/anchor.toml ingest
-anchor --config /tmp/demo/anchor.toml eval --truth /tmp/demo/ground_truth.json
-```
-
-`anchor eval` reports, per question category, how often the intent was read correctly, context
-recall, whether the top answer was right, latency per question, and model calls and tokens.
-
-## Issue boards, discussions and pull requests
-
-`anchor fetch owner/repo` exports the most recently updated issues, discussions and pull requests
-of a GitHub repository (with their comment and review threads) and prints the `[[sources]]`
-entries to add. It uses the GitHub CLI, so run `gh auth login` first; nothing is fetched unless
-you run the command or configure a `[[github]]` entry.
-
-```sh
-anchor fetch grafana/grafana --issues 100 --discussions 50 --pulls 50
-anchor ingest
-anchor query "What is the status of grafana#105210?"
-```
-
-Re-running `anchor fetch owner/repo` downloads only items that are new or changed upstream. To
-have the daemon keep a board current, add it to the configuration; `anchor fetch` with no
-repository refreshes every entry.
 
 ```toml
-[[github]]
-repository = "grafana/grafana"
-issues = 100
-discussions = 50
-pulls = 50
-interval_minutes = 60          # 0: only on `anchor fetch`
-```
-
-Refer to an item as `repo#123` in a question. For `issues` sources, `map` depth ingests titles,
-state, labels and descriptions; `full` adds the comment threads.
-
-## Zoom levels (depth)
-
-Each source is ingested at a depth, like map tiles. Everyone can hold the whole organisation at
-phone-book depth and go deep only where they work.
-
-| Depth | What is ingested |
-|-------|------------------|
-| `phone_book` | Repositories: the service and its owners only. Org model and API portal: everything (they are the phone book). Wikis, Jira and reviews: nothing. |
-| `map` | Plus files, public types (structs, classes, interfaces, traits, enums, modules) with their doc comments, and document text. No functions or methods, no private items, no call graph, no code previews. |
-| `full` | Everything (the default). |
-
-```toml
-[[sources]]
-id = "payments-api"
-kind = "repo"
-trust = "source_of_truth"
-depth = "phone_book"
-location = "/src/payments-api"
-
-[query]
-on_shallow = "background"      # block | background | manual
-```
-
-When a question touches a source below full depth, the answer always lists it under `shallow`
-(in the JSON response, the CLI output and the dashboard), with its depth and what is being done:
-
-- `block`: deepen the source first, then answer from the deeper graph.
-- `background` (default): answer now from what is there, and deepen behind it; asking again later
-  gives the fuller answer.
-- `manual`: answer now and wait for `anchor deepen <source> [--depth map|full]`.
-
-Deepening a source that is on this machine works from the local copy and needs no server. It is
-remembered across restarts and never goes shallower.
-
-### Depth with a sync server
-
-A client does not need a local copy of a source to hold it. Depth is a view, not different
-content: units travel and are stored whole on every device (so hashes, Merkle roots and merging
-are unaffected), and a client materialises into its graph only what its depth for that source
-allows. At `phone_book` depth it does not even request the units that depth would not show
-(files, tickets, wiki pages, reviews), so a whole organisation costs a few units per repository.
-
-```toml
+# each client's anchor.toml
 mode = "client"
 
 [sync]
-server_url = "ws://anchor.example.com:7891/sync"
-default_depth = "phone_book"   # depth of subscribed sources not configured locally (default: full)
+server_url = "ws://anchor.internal:7891/sync"
+auth_token_env = "ANCHOR_SYNC_TOKEN"
+default_depth = "phone_book"   # hold other teams' sources shallowly; deepen on demand
 ```
-
-A source is *remote* when it is not in the local configuration or its `location` does not exist
-on this machine. `anchor sync` brings remote sources in at `default_depth`. When a question
-touches one (or you run `anchor deepen <source> --depth map|full`), the client pulls the missing
-units from the server, re-materialises the source at the new depth and remembers it. With
-`on_shallow = "block"` this happens before the answer, which is then marked `deepened`. Deepening
-a remote source with no sync server configured is an error ("source X is not on this machine and
-no sync server is configured"). Sources that are local keep using the local copy.
-
-## Database size
-
-Size follows code volume, not repository count. Measured on the Kubernetes repository (32k files,
-364k symbols, 1.15M edges): 1.5 GB database, 4 minutes to ingest, under 1 GB of memory. A typical
-40-file service is about 1 MB. Options that trade detail for size:
-
-```toml
-[parser]
-call_graph = true                    # false: files and symbols only, no call/reference/import edges
-keep_unresolved_references = false   # true: keep calls into code outside the graph for later linking
-
-[embeddings]
-embed_code = false                   # true: also embed code previews, not only docs and comments
-```
-
-## Measured retrieval quality
-
-`cargo test --all-features --test e2e -- --nocapture` scores 166 generated questions with known
-answers by node key. Current results: ownership recall 1.00 and top-answer accuracy 0.99, with
-stale reference-only claims never winning; multi-hop relationship questions recall 1.00 and
-precision 1.00; justification recall 0.66 by key (the neutral, text-based score below is higher,
-because the reason is usually returned on the answer rather than as a separate comment node).
-
-## Comparing with other RAG systems
-
-`anchor compare` scores Anchor next to other retrieval systems on the same corpus and questions,
-through a format any system can produce:
-
-- `questions.jsonl`: the question plus the names and aliases of each expected answer, and of
-  each known-stale answer. No Anchor keys are needed to score.
-- `results/<system>.jsonl`: per question, the text contexts retrieved (best first), optionally
-  the system's own answer and an answer generated from those contexts by a shared model.
-- `results/<system>.meta.json`: index size on disk, peak memory, indexing time.
-
-Every system's contexts are cut to the same budget (6,000 tokens) and matched with the same
-string rules. To reproduce:
 
 ```sh
-anchor demo --out corpus/compare/data --scale medium --seed 7      # 100 repos, 657 questions
-mv corpus/compare/data/{anchor.toml,ground_truth.json} corpus/compare/   # keep them out of the corpus
-# set data_dir in corpus/compare/anchor.toml, then:
-anchor --config corpus/compare/anchor.toml compare corpus/compare/run \
-    --truth corpus/compare/ground_truth.json --reindex              # Anchor + plain-retrieval baselines
-
-python -m venv venv && venv/bin/pip install llama-index-core llama-index-embeddings-ollama \
-    llama-index-retrievers-bm25 langchain langchain-community langchain-ollama \
-    langchain-text-splitters faiss-cpu rank_bm25 lightrag-hku
-cd scripts/compare
-python run_llamaindex.py ../../corpus/compare/data ../../corpus/compare/run --index-dir /tmp/li
-python run_langchain.py  ../../corpus/compare/data ../../corpus/compare/run --index-dir /tmp/lc
-python run_lightrag.py   ../../corpus/compare/data ../../corpus/compare/run --workdir /tmp/lr   # hours
-python generate.py ../../corpus/compare/run          # same local model answers from each system's contexts
-anchor compare ../../corpus/compare/run [--kinds]    # score everything
+anchor sync        # or run the daemon, which syncs on an interval
 ```
 
-To add another system, write its `results/<name>.jsonl`; `scripts/compare/common.py` has the
-helpers.
+Put a TLS-terminating reverse proxy in front for anything beyond a private network; the server
+itself speaks plain WebSocket and gRPC. For air-gapped sharing, `anchor export` writes a signed
+`.contextpack` file that `anchor import` merges. Setup without Docker, device trust, TLS and the
+current limits (no per-user access control) are in [docs/hosting.md](docs/hosting.md).
 
-Results on the 100-repository synthetic enterprise (735 questions: ownership, justification,
-multi-hop relationships, and prose "how do I" questions, half of them paraphrased; LlamaIndex
-and LangChain with their default loaders and splitters and `nomic-embed-text` embeddings;
-answers generated by `llama3.1:8b` on a 131-question sample):
+## Commands
 
-| System | Answers in retrieved context | Reader model answers correctly | Tokens per question | ms per query |
-|---|---|---|---|---|
-| Anchor | 0.99 | 0.85 | 1,286 | 6 |
-| LlamaIndex hybrid (vector + BM25) | 0.89 | 0.49 | 3,100 | 30–50 |
-| LlamaIndex BM25 | 0.85 | 0.44 | 3,646 | 0.6 |
-| LlamaIndex vector | 0.64 | 0.41 | 2,125 | 30–75 |
-| LangChain hybrid | 0.70 | 0.42 | 1,950 | 20–40 |
-| LangChain BM25 | 0.63 | 0.35 | 2,170 | 2 |
-| LangChain vector | 0.66 | 0.34 | 1,563 | 14–20 |
-| Plain full-text over Anchor's chunks | 0.49 | 0.22 | 1,863 | 5 |
-| LightRAG (graph RAG, `mix` mode) | 0.69 | 0.32 | 5,305 | 430 |
+| Command | Purpose |
+|---------|---------|
+| `anchor setup` | Interactive setup wizard |
+| `anchor init [--force]` | Write a starter configuration |
+| `anchor ingest [--source ID]` | Scan sources into the graph (incremental) |
+| `anchor query "…" [--json] [--explain] [--local-only] [--retrieval-only]` | Ask a question (`--explain`: model-written prose) |
+| `anchor daemon [--no-web]` | Scan, watch files, serve the dashboard |
+| `anchor status` | Graph and source statistics |
+| `anchor spend [--days N]` | Token usage and estimated cost, local vs. cloud |
+| `anchor backlog` | Open gap-analysis items |
+| `anchor enrich [--limit N]` | Summarise and tag pages, tickets, PRs and APIs with the local model |
+| `anchor why TARGET [--json]` | Why is this code the way it is: blame, then commit → pull request → review → ticket → pages |
+| `anchor mcp` | Serve the Model Context Protocol on stdio, for agents (Claude Code, Cursor, …) |
+| `anchor mcp install [--client …] [--print]` | Register the MCP server with Claude Code, Claude Desktop or Cursor |
+| `anchor fetch-atlassian [URL]` | Export Confluence spaces and Jira projects (incremental; see `docs/atlassian.md`) |
+| `anchor eval --truth FILE` | Score the engine against questions with known answers |
+| `anchor compare DIR [--truth FILE] [--reindex] [--kinds]` | Score Anchor next to plain retrieval and other RAG systems: quality, latency, disk and memory |
+| `anchor fetch OWNER/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
+| `anchor deepen SOURCE [--depth map\|full]` | Ingest a source more deeply |
+| `anchor export [-o FILE]` / `anchor import FILE` | Write or merge a signed `.contextpack` |
+| `anchor server` / `anchor sync` | Run the central sync server / sync once against it |
+| `anchor ollama status\|provision\|teardown\|rebuild` | Manage the local Ollama backend |
+| `anchor demo --out DIR` | Generate a synthetic enterprise to try Anchor on |
 
-The vector and hybrid latencies are dominated by the call to the embedding model and varied
-with GPU load between runs; their keyword-only modes are faster than Anchor.
+## More documentation
 
-By category, reader-model answers (Anchor / best other system): ownership 0.88 / 0.37,
-justification 0.80 / 0.60, relationships 1.00 / 0.60, prose 0.70 / 0.63. Prose is where neural
-embeddings are strongest: every vector mode retrieves 1.00 of those answers, Anchor 0.99
-(without a neural embedding model, by quoting the pages that document the entity the question
-names). On the 12 questions where a stale reference-only source contradicts the source of
-truth, the reader led with the correct owner 12 of 12 times on Anchor's context and at most
-1 of 12 times on any other system's. Anchor also answers 0.88 of all questions directly from
-the graph, without a model (everything except prose).
-
-| System | Index on disk | Peak memory | Indexing time |
-|---|---|---|---|
-| Anchor | 12.7 MB | 192 MB | 1.8 s |
-| LangChain (FAISS + BM25) | 8.7 MB | 200 MB | 24–43 s |
-| LlamaIndex (vector + BM25) | 16.5 MB | 323 MB | 18–27 s |
-| LightRAG | 54.3 MB | 1,067 MB | about 1 h 40 min |
-
-LightRAG builds its graph by sending every chunk to a language model, here `llama3.1:8b` on one
-GPU that other jobs were sharing; a few chunks timed out and were skipped, and its documentation
-recommends a much larger model, so its scores here are a floor, not its best. Each query also
-calls the model for keywords, which is most of its 430 ms. By category its reader scores were
-ownership 0.15, justification 0.33, relationships 0.20 and prose 0.67; on the conflict questions
-0 of 12. It returns one block of text per question, so the ranking metrics below do not apply
-to it.
-
-The LangChain and LlamaIndex figures leave out the embedding model, which runs in Ollama
-(274 MB on disk, plus its memory); Anchor's default embeddings are computed in-process.
-
-The same run scored with the metrics other projects define. None of LlamaIndex, LangChain,
-LightRAG, GraphRAG or Ragas publishes speed or footprint figures in its repository, so there are
-no upstream numbers to match on those; the quality metrics they define are:
-
-| System | Hit rate | MRR | Precision | nDCG | Context precision |
-|---|---|---|---|---|---|
-| Anchor | 0.99 | 0.93 | 0.16 | 0.91 | 0.85 |
-| LlamaIndex hybrid | 0.89 | 0.45 | 0.12 | 0.54 | 0.40 |
-| LlamaIndex BM25 | 0.85 | 0.57 | 0.12 | 0.61 | 0.50 |
-| LlamaIndex vector | 0.64 | 0.34 | 0.08 | 0.40 | 0.31 |
-| LangChain hybrid | 0.70 | 0.37 | 0.09 | 0.44 | 0.34 |
-| LangChain BM25 | 0.63 | 0.32 | 0.08 | 0.38 | 0.30 |
-| LangChain vector | 0.67 | 0.36 | 0.09 | 0.42 | 0.33 |
-
-Hit rate, MRR, precision and nDCG are LlamaIndex's retrieval metrics (`RetrieverEvaluator`);
-context precision is Ragas' non-LLM variant. Those libraries judge relevance by chunk id; since
-every system here chunks differently, a context counts as relevant when it contains an expected
-answer. Anchor's MRR is helped by its direct answer being the first thing it returns. Its low
-precision (most of what it returns is supporting evidence, not the answer) is a known limitation.
-
-LightRAG evaluates itself differently: an LLM judge picks the better of two answers for
-comprehensiveness, diversity and empowerment (`scripts/compare/judge.py` reproduces its prompt).
-With `llama3.1:8b` as judge on 101 questions (before the prose questions were added), Anchor's
-answers won overall 49% of the time against LlamaIndex hybrid, 47% against LlamaIndex BM25 and
-53% against LangChain hybrid: a tie. Those criteria reward long, many-sided answers and do not
-check correctness, so they say little about factual questions like these.
-
-Effect of System 1 enrichment (summaries, tags and "questions this text answers", written at
-ingestion by `llama3.2:3b`): none measurable on this benchmark. Enriching all 276 pages, tickets,
-pull requests and APIs took 3 min 43 s and 0.9 MB, and every score stayed within 0.01. The
-questions here all name the entity they are about, so the graph already finds the text;
-enrichment is aimed at questions that name nothing and use different words, which this
-generated set does not contain.
-
-How to read these numbers:
-
-- The corpus and questions are generated by this project and exercise what Anchor was built
-  for: ownership, trust conflicts and typed multi-hop relationships. Free-form "how does this
-  work" questions over prose, where vector search is strong, are not in the set.
-- Anchor's retrieval was improved after the first comparison (0.81 before, 0.99 after), and
-  again after prose questions were added (0.85 on those before, 0.99 after). A second
-  corpus generated with a different seed and never inspected scores the same, but it uses the
-  same question templates, so the result may not carry over to differently worded questions.
-- "Answers in retrieved context" only checks that the answer's name appears in the text; the
-  reader-model column is the better measure of whether the context is usable.
-- The other systems ran with out-of-the-box settings; tuned chunking, a reranker or a stronger
-  embedding model would raise their scores.
-
-## Known limitations
-
-- Relation chains are read by rules: a multi-hop question worded outside the phrases in
-  `src/engine/router/relation.rs` falls back to neighbourhood retrieval (or to the System 1
-  model when it is enabled).
-- A file or endpoint name shared by several repositories is answered as ambiguous unless the
-  question names the service.
-- Context precision is low (about 0.2 for ownership): the context includes neighbouring evidence
-  beyond the answer.
-- One provisioning test (`a_system_binary_is_preferred_over_downloading`) failed once in a full
-  parallel run and passed on every re-run; it is probably a port race in the test fakes.
-
-- Two graph nodes that already exist are not merged retroactively when a later source reveals
-  they are the same entity; `GraphStore::rebuild` re-materialises the graph and heals this.
-- Wiki prose is linked to entities it mentions, but ownership stated only in prose is not turned
-  into an ownership claim.
-- Managed Ollama installation supports Linux only.
+| Page | Contents |
+|---|---|
+| [docs/install.md](docs/install.md) | Packages, install script, Docker, running as a service |
+| [docs/data-sources.md](docs/data-sources.md) | Source kinds and formats, GitHub fetch, depth levels, database size |
+| [docs/atlassian.md](docs/atlassian.md) | Confluence and Jira connector |
+| [docs/models.md](docs/models.md) | Model tiers, providers, cost controls, managing Ollama |
+| [docs/hosting.md](docs/hosting.md) | Team sync server, clients, TLS, packs |
+| [docs/benchmarks.md](docs/benchmarks.md) | Comparison with LlamaIndex, LangChain and LightRAG: results, method, dataset, caveats |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design: units, trust-weighted paths, sync, storage |
+| [docs/development.md](docs/development.md) | Building, tests, performance budgets, known limitations |
