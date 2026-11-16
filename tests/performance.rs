@@ -7,6 +7,8 @@
 //! * CPU while idle (watcher running, nothing changing): ~0 %;
 //! * resident memory under a heavy concurrent query load: under 3 GB;
 //! * SQLite and `.contextpack` footprint measured at two scales and projected to 1,000 repos.
+// Reads CPU time and resident memory through Unix interfaces.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;

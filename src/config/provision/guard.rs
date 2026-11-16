@@ -390,6 +390,7 @@ impl RootLock {
             {
                 // No managed installation exists on these platforms, so there is nothing two
                 // processes could corrupt; the file is only held open.
+                let _ = (timeout, started);
                 return Ok(Self { _file: file });
             }
             #[cfg(unix)]

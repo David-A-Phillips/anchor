@@ -7,7 +7,6 @@ description = "Local-first context engine and synchronization daemon that ground
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/David-A-Phillips/anchor"
-homepage = "https://github.com/David-A-Phillips/anchor"
 authors = ["David <phillipsadavid@gmail.com>"]
 keywords = ["context", "mcp", "code-search", "knowledge-graph", "daemon"]
 categories = ["command-line-utilities", "development-tools"]
