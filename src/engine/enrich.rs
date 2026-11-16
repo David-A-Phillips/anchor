@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::core::Engine;
+use super::router::TieredRouter;
 use crate::base::{
     CallPurpose, ChunkKind, CompletionRequest, ContentHash, EdgeAssertion, EdgeKind, Lookup,
     ModelTier, NodeAssertion, NodeKind, ResponseFormat, Result, SourceDescriptor, SourceId,
@@ -81,8 +82,13 @@ impl Engine {
     /// Summarises and tags up to `limit` nodes with the System 1 model. Does nothing when no
     /// System 1 model is configured.
     pub async fn enrich(&self, limit: usize) -> Result<EnrichReport> {
+        self.enrich_with(&self.router(), limit).await
+    }
+
+    /// [`Self::enrich`] against an explicit router (the engine's own one in production; a
+    /// scripted one in tests).
+    pub async fn enrich_with(&self, router: &TieredRouter, limit: usize) -> Result<EnrichReport> {
         let mut report = EnrichReport::default();
-        let router = self.router();
         if router.model_info(ModelTier::System1).is_none() {
             return Ok(report);
         }
@@ -231,7 +237,16 @@ impl Engine {
             let engine_units = units;
             // `apply` is blocking; the engine is used through `&self`, so run it in place on a
             // blocking-capable thread.
-            tokio::task::block_in_place(|| self.apply(&engine_units))?;
+            // `block_in_place` is only allowed on the multi-threaded runtime; on a current-thread
+            // one (some embedders, `#[tokio::test]`) applying inline is the only option.
+            if matches!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            ) {
+                tokio::task::block_in_place(|| self.apply(&engine_units))?;
+            } else {
+                self.apply(&engine_units)?;
+            }
         }
         Ok(report)
     }
