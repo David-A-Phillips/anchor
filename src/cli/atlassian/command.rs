@@ -13,6 +13,7 @@ use crate::engine::Engine;
 /// configuration is refreshed; with it, the flags describe one site (credentials still come from
 /// the named environment variables).
 #[derive(Clone, Debug, clap::Args)]
+#[allow(rustdoc::invalid_html_tags)] // the field docs are the `--help` text, where `<host>` reads naturally
 pub struct FetchAtlassianArgs {
     /// Site URL (`https://acme.atlassian.net`); omit to refresh every `[[atlassian]]` entry.
     pub base_url: Option<String>,

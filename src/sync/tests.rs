@@ -330,6 +330,23 @@ async fn say_hello(peer: &mut WsPeer) {
     peer.hello(hello).await.expect("hello");
 }
 
+#[test]
+fn the_hello_debug_output_never_contains_the_bearer_token() {
+    let hello = super::protocol::Hello {
+        version: PROTOCOL_VERSION,
+        device_id: "d".into(),
+        token: Some("s3cret-token".into()),
+        mode: Mode::Sync,
+        roots: BTreeMap::new(),
+    };
+    let printed = format!(
+        "{hello:?} {:?}",
+        super::protocol::Request::Hello(hello.clone())
+    );
+    assert!(!printed.contains("s3cret-token"), "{printed}");
+    assert!(printed.contains("redacted"));
+}
+
 fn graph_store(
     sources: &[(&str, TrustLevel)],
 ) -> (GraphStore, Arc<Mutex<ContextGraph>>, Arc<GraphUnitStore>) {

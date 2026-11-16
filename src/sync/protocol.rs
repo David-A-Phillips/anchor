@@ -53,7 +53,7 @@ pub enum Mode {
 }
 
 /// Client greeting.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Hello {
     /// Protocol version of the client.
     pub version: u32,
@@ -65,6 +65,19 @@ pub struct Hello {
     pub mode: Mode,
     /// Merkle root of each client namespace.
     pub roots: BTreeMap<SourceId, ContentHash>,
+}
+
+impl std::fmt::Debug for Hello {
+    /// The bearer token is never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hello")
+            .field("version", &self.version)
+            .field("device_id", &self.device_id)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("mode", &self.mode)
+            .field("roots", &self.roots)
+            .finish()
+    }
 }
 
 /// Server greeting.

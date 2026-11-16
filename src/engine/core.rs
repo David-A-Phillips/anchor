@@ -718,7 +718,19 @@ impl Engine {
     ) -> (Option<Arc<OwnershipRules>>, Vec<Unit>) {
         let mut units = Vec::new();
         let mut rules = None;
-        let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+        // A file that cannot be read is reported rather than silently treated as empty (which
+        // would drop the repository's ownership rules); invalid UTF-8 is tolerated.
+        let read_warnings = std::cell::RefCell::new(Vec::<String>::new());
+        let read = |path: &Path| match std::fs::read(path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(err) => {
+                read_warnings.borrow_mut().push(format!(
+                    "{}: cannot read ownership file: {err}",
+                    path.display()
+                ));
+                String::new()
+            }
+        };
         let kinds: Vec<(&(PathBuf, String), OwnershipFileKind)> = files
             .iter()
             .filter_map(|file| ownership_file_kind(&file.1).map(|kind| (file, kind)))
@@ -755,6 +767,7 @@ impl Engine {
         } else {
             None
         };
+        report.warnings.append(&mut read_warnings.borrow_mut());
         let _ = root;
         if let Some((rel, result)) = parsed {
             match result {

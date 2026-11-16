@@ -53,7 +53,7 @@
 //!
 //! Entries are yielded before the payload hash can be checked. Importers that must not act on
 //! unauthenticated entries call [`PackReader::verify_payload`] first (it needs `Seek`), as
-//! [`import_pack`](super::import_pack) does.
+//! `Engine::import_pack` does.
 //!
 //! Writer and reader hold one record in memory at a time. The writer spools the compressed payload
 //! to an anonymous temporary file, because the manifest that precedes it in the file is only known
