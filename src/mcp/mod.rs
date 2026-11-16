@@ -14,6 +14,7 @@
 //! * `why`: the trail from a file, line range or symbol to the commits, pull requests, review
 //!   decisions, tickets and pages that explain it.
 //! * `deepen`: ingest a shallow source more deeply, then ask again.
+//! * `ingest`: rescan the sources when no daemon is keeping the graph current.
 //! * `status`: what is indexed and at which depth.
 
 pub mod install;
@@ -46,7 +47,9 @@ tickets, reviews and org structure. Use `ask` for questions such as who owns som
 decision was made, or what depends on what; every piece of evidence carries a trust level \
 (`source_of_truth` outranks `reference_only`) and conflicts are reported with the winning claim. \
 If a response lists `shallow` sources, the answer rests on partially ingested data: call `deepen` \
-for that source and ask again.";
+for that source and ask again. Call `status` once per session: if `daemon_running` is false, \
+call `ingest` before relying on answers and again after large changes. Use `why` on code \
+whose purpose is unclear before changing it.";
 
 /// The MCP server.
 #[derive(Clone)]
@@ -143,8 +146,20 @@ pub fn tools() -> Vec<Value> {
             &["source"],
         ),
         tool(
+            "ingest",
+            "Rescan sources into the graph. Needed only when `status` reports \
+             `daemon_running: false`: then the graph is as old as the last ingest, so call this \
+             once at the start of a session and after pulling, switching branches or large \
+             edits. Incremental: unchanged files are skipped. May take seconds to minutes.",
+            json!({
+                "source": { "type": "string", "description": "Source id to rescan; omit for every source." },
+            }),
+            &[],
+        ),
+        tool(
             "status",
-            "What Anchor has indexed: sources with their kind, trust and depth, and entity counts.",
+            "What Anchor has indexed: sources with their kind, trust and depth, entity counts, and \
+             `daemon_running` (whether a daemon is keeping the graph current; if not, use `ingest`).",
             json!({}),
             &[],
         ),
@@ -463,7 +478,65 @@ impl McpServer {
         }))
     }
 
+    async fn ingest(&self, args: &Map<String, Value>) -> Result<Value> {
+        let source = args
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .map(SourceId::new);
+        let reports = self
+            .blocking(move |server| match source {
+                Some(source) => Ok(vec![server.engine.scan_source(&source)?]),
+                None => server.engine.scan_all(),
+            })
+            .await?;
+        let embedded = self.engine.embed_pending().await?;
+        self.engine.flush()?;
+        let sources: Vec<Value> = reports
+            .iter()
+            .map(|report| {
+                json!({
+                    "source": report.source,
+                    "files_seen": report.files_seen,
+                    "files_unchanged": report.files_unchanged,
+                    "units_applied": report.units_applied,
+                    "units_removed": report.units_removed,
+                    "warnings": report.warnings.len(),
+                })
+            })
+            .collect();
+        Ok(json!({ "sources": sources, "chunks_embedded": embedded }))
+    }
+
+    /// Whether a daemon is serving the dashboard for this configuration, which means it is also
+    /// watching files and refreshing sources.
+    async fn daemon_running(&self) -> bool {
+        let web = &self.engine.config().web;
+        let host = if web.bind == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            web.bind.as_str()
+        };
+        let address = format!("{host}:{}", web.port);
+        matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await,
+            Ok(Ok(_))
+        )
+    }
+
     async fn status(&self) -> Result<Value> {
+        let daemon_running = self.daemon_running().await;
+        let mut status = self.status_blocking().await?;
+        status["daemon_running"] = json!(daemon_running);
+        Ok(status)
+    }
+
+    async fn status_blocking(&self) -> Result<Value> {
         self.blocking(|server| {
             let engine = &server.engine;
             let stats = engine.store().stats()?;
@@ -510,6 +583,7 @@ impl McpServer {
                 Ok(serde_json::to_value(report)?)
             }
             "deepen" => self.deepen(args).await,
+            "ingest" => self.ingest(args).await,
             "status" => self.status().await,
             other => Err(Error::not_found(format!("unknown tool `{other}`"))),
         }

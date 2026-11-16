@@ -28,6 +28,8 @@ fn server(dir: &std::path::Path) -> McpServer {
     };
     config.models.system1.provider = ProviderKind::Disabled;
     config.query.on_shallow = ShallowPolicy::Manual;
+    // Nothing listens here, so the server reports that no daemon is running.
+    config.web.port = 1;
     let mut source = SourceConfig::new("payments-api", SourceKind::Repo, repo.to_string_lossy());
     source.depth = Depth::PhoneBook;
     config.sources.push(source);
@@ -133,7 +135,9 @@ async fn an_agent_can_ask_see_shallow_areas_deepen_and_ask_again() {
         .collect();
     assert_eq!(
         names,
-        ["ask", "search", "get", "path", "why", "deepen", "status"]
+        [
+            "ask", "search", "get", "path", "why", "deepen", "ingest", "status"
+        ]
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object");
@@ -199,7 +203,16 @@ async fn an_agent_can_ask_see_shallow_areas_deepen_and_ask_again() {
     assert_eq!(path["reference_only_elements"], 0);
     assert!(!path["steps"].as_array().unwrap().is_empty());
 
+    // No daemon serves this configuration, so the agent is told to ingest; doing so is a no-op
+    // on an unchanged tree.
+    let refreshed = client
+        .tool("ingest", json!({ "source": "payments-api" }))
+        .await;
+    assert_eq!(refreshed["sources"][0]["source"], "payments-api");
+    assert_eq!(refreshed["sources"][0]["files_unchanged"], 1);
+    assert_eq!(refreshed["sources"][0]["units_removed"], 0);
     let status = client.tool("status", json!({})).await;
+    assert_eq!(status["daemon_running"], false);
     assert_eq!(status["sources"][0]["id"], "payments-api");
     assert_eq!(status["sources"][0]["depth"], "full");
 }

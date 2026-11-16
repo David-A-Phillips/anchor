@@ -48,7 +48,13 @@ pub struct InstallArgs {
     /// Claude Code scope (`local`, `user` or `project`); the `claude` default when omitted.
     #[arg(long)]
     pub scope: Option<String>,
+    /// Do not install the Anchor skill for Claude Code.
+    #[arg(long)]
+    pub no_skill: bool,
 }
+
+/// The agent skill: when to call Anchor, how to read its answers and how to keep it current.
+pub const SKILL: &str = include_str!("../../skills/anchor/SKILL.md");
 
 /// Arguments of `anchor mcp uninstall`.
 #[derive(Args, Debug, Clone)]
@@ -74,6 +80,10 @@ pub struct Locations {
     pub claude_desktop: PathBuf,
     /// Cursor's `mcp.json`.
     pub cursor: PathBuf,
+    /// Claude Code's per-user skills directory (`~/.claude/skills`).
+    pub claude_skills: PathBuf,
+    /// Claude Code's per-project skills directory (`./.claude/skills`).
+    pub project_skills: PathBuf,
 }
 
 impl Locations {
@@ -87,6 +97,8 @@ impl Locations {
                 .join("Claude")
                 .join("claude_desktop_config.json"),
             cursor: dirs.home_dir().join(".cursor").join("mcp.json"),
+            claude_skills: dirs.home_dir().join(".claude").join("skills"),
+            project_skills: PathBuf::from(".claude").join("skills"),
         })
     }
 }
@@ -310,6 +322,29 @@ fn claude_step(cmd: &[String], print: bool, runner: &dyn CommandRunner) -> Resul
     }
 }
 
+fn skill_dir(locations: &Locations, scope: Option<&str>) -> PathBuf {
+    let base = if scope == Some("project") {
+        &locations.project_skills
+    } else {
+        &locations.claude_skills
+    };
+    base.join("anchor")
+}
+
+/// Writes the skill to `<dir>/SKILL.md` so Claude Code knows when and how to use Anchor.
+fn write_skill(dir: &Path, print: bool) -> Result<String> {
+    let path = dir.join("SKILL.md");
+    if print {
+        return Ok(format!(
+            "Would write the Anchor skill to {}",
+            path.display()
+        ));
+    }
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(&path, SKILL)?;
+    Ok(format!("Installed the Anchor skill at {}", path.display()))
+}
+
 /// Register Anchor with the requested hosts. Returns the lines to show the user.
 pub fn install(
     args: &InstallArgs,
@@ -324,6 +359,10 @@ pub fn install(
             Client::ClaudeCode => {
                 let cmd = claude_add_args(&args.name, exe, config, args.scope.as_deref());
                 out.push(claude_step(&cmd, args.print, runner)?);
+                if !args.no_skill {
+                    let dir = skill_dir(locations, args.scope.as_deref());
+                    out.push(write_skill(&dir, args.print)?);
+                }
             }
             Client::ClaudeDesktop => out.push(edit_json(
                 &locations.claude_desktop,
@@ -363,6 +402,15 @@ pub fn uninstall(
                 }
                 cmd.push(args.name.clone());
                 out.push(claude_step(&cmd, args.print, runner)?);
+                let skill = skill_dir(locations, args.scope.as_deref()).join("SKILL.md");
+                if skill.is_file() {
+                    if args.print {
+                        out.push(format!("Would remove {}", skill.display()));
+                    } else {
+                        std::fs::remove_file(&skill)?;
+                        out.push(format!("Removed {}", skill.display()));
+                    }
+                }
             }
             Client::ClaudeDesktop => out.push(edit_json(
                 &locations.claude_desktop,
@@ -411,7 +459,66 @@ mod tests {
         Locations {
             claude_desktop: dir.join("Claude").join("claude_desktop_config.json"),
             cursor: dir.join(".cursor").join("mcp.json"),
+            claude_skills: dir.join(".claude").join("skills"),
+            project_skills: dir.join("project").join(".claude").join("skills"),
         }
+    }
+
+    #[test]
+    fn the_skill_is_installed_with_claude_code_and_removed_with_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let locations = locs(dir.path());
+        let runner = fake(true);
+        let user = locations.claude_skills.join("anchor").join("SKILL.md");
+        let project = locations.project_skills.join("anchor").join("SKILL.md");
+
+        // Print mode writes nothing.
+        let lines = install(
+            &args(Client::ClaudeCode, true),
+            &exe(),
+            None,
+            &locations,
+            &runner,
+        )
+        .expect("print");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Would write the Anchor skill"))
+        );
+        assert!(!user.exists());
+
+        install(
+            &args(Client::ClaudeCode, false),
+            &exe(),
+            None,
+            &locations,
+            &runner,
+        )
+        .expect("install");
+        let text = std::fs::read_to_string(&user).expect("skill written");
+        assert!(text.starts_with("---\nname: anchor\n"));
+        assert!(text.contains("daemon_running"));
+
+        // Project scope goes to the project's skills directory; --no-skill writes none.
+        let mut scoped = args(Client::ClaudeCode, false);
+        scoped.scope = Some("project".into());
+        install(&scoped, &exe(), None, &locations, &runner).expect("project");
+        assert!(project.is_file());
+        std::fs::remove_file(&user).expect("remove");
+        let mut without = args(Client::ClaudeCode, false);
+        without.no_skill = true;
+        install(&without, &exe(), None, &locations, &runner).expect("no skill");
+        assert!(!user.exists());
+
+        let removal = UninstallArgs {
+            client: Client::ClaudeCode,
+            name: "anchor".into(),
+            print: false,
+            scope: Some("project".into()),
+        };
+        uninstall(&removal, &locations, &runner).expect("uninstall");
+        assert!(!project.exists());
     }
 
     fn args(client: Client, print: bool) -> InstallArgs {
@@ -420,6 +527,7 @@ mod tests {
             name: "anchor".into(),
             print,
             scope: None,
+            no_skill: false,
         }
     }
 

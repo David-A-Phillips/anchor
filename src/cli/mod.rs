@@ -6,6 +6,7 @@ mod daemon;
 mod dist;
 pub mod eval;
 pub mod fetch;
+pub mod source;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -188,6 +189,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<McpAction>,
     },
+    /// List, add or remove sources without editing the configuration by hand.
+    Source {
+        #[command(subcommand)]
+        action: source::SourceAction,
+    },
     /// Run the central sync server (WebSocket and gRPC on `sync.listen`).
     Server,
     /// Synchronise once with the configured sync server and print the result.
@@ -314,6 +320,9 @@ enum McpAction {
     Install(crate::mcp::install::InstallArgs),
     /// Remove the registration made by `install`.
     Uninstall(crate::mcp::install::UninstallArgs),
+    /// Print the agent skill (when to call Anchor, how to keep it current), e.g. to paste into
+    /// an `AGENTS.md` or a rules file for hosts without skill support.
+    Skill,
 }
 
 fn run_mcp_action(action: McpAction, config: Option<&Path>) -> Result<()> {
@@ -335,6 +344,7 @@ fn run_mcp_action(action: McpAction, config: Option<&Path>) -> Result<()> {
         McpAction::Uninstall(args) => {
             install::uninstall(&args, &locations, &install::SystemRunner)?
         }
+        McpAction::Skill => vec![install::SKILL.to_owned()],
     };
     for line in lines {
         println!("{line}");
@@ -789,6 +799,14 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "Questions with known answers are in {}.",
                 out.join("ground_truth.json").display()
             );
+        }
+        Command::Source { action } => {
+            let (config, path) = load_config(cli.config.as_deref())?;
+            let lines =
+                tokio::task::spawn_blocking(move || source::run(action, config, &path)).await??;
+            for line in lines {
+                println!("{line}");
+            }
         }
         Command::Deepen { source, depth } => {
             let (config, _) = load_config(cli.config.as_deref())?;
