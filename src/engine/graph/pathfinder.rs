@@ -378,6 +378,8 @@ impl<'a> Pathfinder<'a> {
     }
 }
 
+crate::base::opaque_debug!(@'a; Pathfinder<'a>);
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -204,3 +204,5 @@ impl EmbeddingFetcher for HuggingFaceFetcher {
         crate::engine::embed::ensure_model(models_dir, repo_id, progress).await
     }
 }
+
+crate::base::opaque_debug!(ManagerBackend, HuggingFaceFetcher);

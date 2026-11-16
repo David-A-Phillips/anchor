@@ -1494,6 +1494,8 @@ impl QueryEngine {
     }
 }
 
+crate::base::opaque_debug!(QueryDeps, QueryEngine);
+
 #[cfg(test)]
 mod tests {
     use super::*;

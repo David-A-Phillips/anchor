@@ -102,8 +102,8 @@ async fn a_node_gets_tags_a_summary_an_answers_chunk_and_mention_edges() {
         Some("How charges are retried.")
     );
     assert_eq!(
-        page.attrs.get("tags").unwrap(),
-        &serde_json::json!(["retries", "backoff"]),
+        page.attrs["tags"],
+        serde_json::json!(["retries", "backoff"]),
         "tags are trimmed, lower-cased and empty ones dropped"
     );
     assert!(page.aliases.iter().any(|alias| alias == "retries"));

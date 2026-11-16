@@ -270,6 +270,8 @@ impl MerkleSource for &NamespaceTrees {
     }
 }
 
+crate::base::opaque_debug!(MemoryUnitStore);
+
 #[cfg(test)]
 mod tests {
     use super::*;

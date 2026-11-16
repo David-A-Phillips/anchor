@@ -181,7 +181,7 @@ impl std::fmt::Debug for OwnershipRules {
             .field("kind", &self.kind())
             .field("parties", &self.parties.list.len())
             .field("warnings", &self.warnings.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

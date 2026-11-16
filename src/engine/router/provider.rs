@@ -303,6 +303,8 @@ pub(super) async fn probe_get(request: reqwest::RequestBuilder) -> Result<(), Mo
     }
 }
 
+crate::base::opaque_debug!(TierHandle);
+
 #[cfg(test)]
 mod tests {
     use super::*;

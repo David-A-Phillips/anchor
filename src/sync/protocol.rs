@@ -277,3 +277,5 @@ impl From<&ApplyReport> for PushResult {
         }
     }
 }
+
+crate::base::opaque_debug!(Local);

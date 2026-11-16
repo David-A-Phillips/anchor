@@ -584,7 +584,7 @@ impl Session<'_> {
     async fn step_tiers(&mut self) -> Step {
         self.configure_system1().await?;
         self.gate(ModelTier::System1).await?;
-        self.configure_system2().await?;
+        self.configure_system2()?;
         self.gate(ModelTier::System2).await?;
         let system2 = &self.config.models.system2;
         if system2.is_enabled()

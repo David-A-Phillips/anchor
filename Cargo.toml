@@ -29,10 +29,7 @@ tokio-stream = { version = "0.1.19", features = ["sync"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 futures-util = { version = "0.3.34", features = ["sink"] }
 async-trait = "0.1.92"
-bytes = "1.12.1"
 axum = { version = "0.8.9", features = ["ws", "macros", "http2"] }
-tower = "0.5.3"
-tower-http = { version = "0.7.1", features = ["trace"] }
 # TLS everywhere goes through rustls + ring: no OpenSSL headers, cmake or protoc are needed to build.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "charset"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
@@ -55,7 +52,6 @@ tree-sitter-go = "0.25.0"
 tree-sitter-java = "0.23.5"
 tree-sitter-c = "0.24.2"
 petgraph = "0.8.3"
-hashbrown = { version = "0.17.1", default-features = false }
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 
 # --- local embeddings (Candle) --------------------------------------------------------------
@@ -75,13 +71,10 @@ rand = "0.10.3"
 zstd = "0.14.4"
 flate2 = "1.1.11"
 tar = "0.4.46"
-zip = "9.6.0"
 hex = "0.4.3"
 sha2 = "0.11.1"
-base64 = "0.23.1"
 
 # --- source format parsing ------------------------------------------------------------------
-pulldown-cmark = "0.13.6"
 scraper = "0.29.0"
 regex = "1.13.1"
 
@@ -95,7 +88,6 @@ sysinfo = "0.40.3"
 
 # --- utilities ------------------------------------------------------------------------------
 thiserror = "2.0.21"
-anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
 uuid = { version = "1.29.2", features = ["v4", "v7", "serde"] }
 parking_lot = "0.13.0"
@@ -118,17 +110,93 @@ assert_cmd = "2.2.2"
 criterion = "0.8.2"
 predicates = "3.1.4"
 proptest = "1.12.0"
+# Test-only: the dashboard is driven through `ServiceExt::oneshot`, and the Atlassian mock checks
+# Basic credentials.
+tower = { version = "0.5.3", features = ["util"] }
+base64 = "0.23.1"
 
 [lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
+# Every public item is documented and every public type is printable; keep it that way.
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unused_lifetimes = "warn"
+unused_import_braces = "warn"
+redundant_lifetimes = "warn"
+explicit_outlives_requirements = "warn"
 
+# `clippy::all` plus a curated slice of `pedantic`, `nursery` and `restriction`. The principle:
+# enable what finds defects or removes ambiguity and what the code base already satisfies, so the
+# set is a ratchet and not a backlog. Lints that are stylistic or whose fixes would churn thousands
+# of lines without changing behaviour stay off on purpose: `must_use_candidate`,
+# `missing_errors_doc`, `use_self`, `missing_const_for_fn`, `redundant_pub_crate`, `doc_markdown`,
+# `too_many_lines`, `cast_precision_loss`, `similar_names`, `option_if_let_else`,
+# `return_self_not_must_use`, `derive_partial_eq_without_eq` and `significant_drop_tightening`.
+# The `cast_*` family is also off: the casts that remain are bounded by construction (line numbers,
+# SQLite row ids, dimensions) and each risky one was reviewed by hand rather than allow-listed.
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Panics on untrusted input: unwrap is allowed only in tests (see clippy.toml); debugging leftovers.
 unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+mem_forget = "warn"
+get_unwrap = "warn"
+unwrap_in_result = "warn"
+lossy_float_literal = "warn"
+str_to_string = "warn"
+
+# Correctness and robustness.
+manual_assert = "warn"
+unnecessary_wraps = "warn"
+large_futures = "warn"
+large_types_passed_by_value = "warn"
+missing_panics_doc = "warn"
+mut_mut = "warn"
+option_option = "warn"
+implicit_hasher = "warn"
+comparison_chain = "warn"
+match_bool = "warn"
+semicolon_if_nothing_returned = "warn"
+missing_fields_in_debug = "warn"
+significant_drop_in_scrutinee = "warn"
+ref_option = "warn"
+unused_async = "warn"
+
+# Readability and consistency.
+manual_let_else = "warn"
+uninlined_format_args = "warn"
+explicit_iter_loop = "warn"
+explicit_into_iter_loop = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+needless_continue = "warn"
+redundant_else = "warn"
+unnested_or_patterns = "warn"
+match_wildcard_for_single_variants = "warn"
+cloned_instead_of_copied = "warn"
+flat_map_option = "warn"
+filter_map_next = "warn"
+ignored_unit_patterns = "warn"
+if_not_else = "warn"
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+needless_for_each = "warn"
+stable_sort_primitive = "warn"
+unnecessary_semicolon = "warn"
+single_char_pattern = "warn"
+string_add_assign = "warn"
+range_plus_one = "warn"
+range_minus_one = "warn"
+manual_is_variant_and = "warn"
+iter_filter_is_ok = "warn"
+iter_filter_is_some = "warn"
+unnecessary_join = "warn"
+doc_link_with_quotes = "warn"
+doc_broken_link = "warn"
 
 # Tests assert real latency budgets (e.g. file change -> graph mutation < 50 ms), so the dev/test
 # profile optimises dependencies fully (tree-sitter, SQLite, BLAKE3, zstd are C/SIMD heavy) and the

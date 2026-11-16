@@ -136,7 +136,8 @@ impl InquirePrompter {
     }
 
     fn clear_bar(&self) {
-        if let Some((_, bar)) = self.bar.lock().take() {
+        let taken = self.bar.lock().take();
+        if let Some((_, bar)) = taken {
             bar.finish_and_clear();
         }
     }
@@ -640,3 +641,5 @@ impl Prompter for DefaultsPrompter<'_> {
         self.output.progress(progress);
     }
 }
+
+crate::base::opaque_debug!(InquirePrompter, ScriptedPrompter, @'a; DefaultsPrompter<'a>);

@@ -370,7 +370,7 @@ impl Session<'_> {
         match picked {
             0 => {
                 edited.trust =
-                    self.ask_trust(&format!("`{}`", source.id), source.kind, Some(source.trust))?
+                    self.ask_trust(&format!("`{}`", source.id), source.kind, Some(source.trust))?;
             }
             1 => edited.location = self.ask_location(source.kind, Some(&source.location))?,
             2 => self.ask_wiki_options(&mut edited)?,

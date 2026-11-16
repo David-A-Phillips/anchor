@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(engine.vectors().len(), 0);
         engine.scan_all().expect("scan");
         embed_and_enrich(&engine).await;
-        assert!(engine.vectors().len() > 0, "pending chunks were embedded");
+        assert!(!engine.vectors().is_empty(), "pending chunks were embedded");
         // A second pass has nothing to do and must not fail.
         embed_and_enrich(&engine).await;
     }
@@ -377,10 +377,10 @@ mod tests {
         // The scan published GraphChanged; wait for it, then for the debounced pass.
         while !matches!(events.recv().await, Ok(EngineEvent::GraphChanged { .. })) {}
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while engine.vectors().len() == 0 && std::time::Instant::now() < deadline {
+        while engine.vectors().is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(engine.vectors().len() > 0);
+        assert!(!engine.vectors().is_empty());
         task.abort();
     }
 }

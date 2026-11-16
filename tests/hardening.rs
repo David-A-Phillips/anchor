@@ -13,9 +13,11 @@ fn engine_over(repo: &std::path::Path, data: &std::path::Path) -> std::sync::Arc
         ..AnchorConfig::default()
     };
     config.models.system1.provider = ProviderKind::Disabled;
-    config
-        .sources
-        .push(SourceConfig::new("svc", SourceKind::Repo, repo.to_string_lossy()));
+    config.sources.push(SourceConfig::new(
+        "svc",
+        SourceKind::Repo,
+        repo.to_string_lossy(),
+    ));
     Engine::open(config).unwrap()
 }
 
@@ -34,13 +36,18 @@ fn an_ownership_file_that_is_not_valid_utf8_still_yields_its_owners() {
     let engine = engine_over(&repo, &dir.path().join("data"));
     let reports = engine.scan_all().unwrap();
     assert!(
-        reports[0].warnings.iter().all(|w| !w.contains("cannot read")),
+        reports[0]
+            .warnings
+            .iter()
+            .all(|w| !w.contains("cannot read")),
         "{:?}",
         reports[0].warnings
     );
     let teams = engine.store().nodes_by_kind(NodeKind::Team, 10, 0).unwrap();
     assert!(
-        teams.iter().any(|t| t.key.as_str() == "team:payments-platform"),
+        teams
+            .iter()
+            .any(|t| t.key.as_str() == "team:payments-platform"),
         "the owner survives the bad bytes: {:?}",
         teams.iter().map(|t| t.key.to_string()).collect::<Vec<_>>()
     );

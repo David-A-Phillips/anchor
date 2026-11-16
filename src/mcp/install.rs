@@ -377,6 +377,8 @@ pub fn uninstall(
     Ok(out)
 }
 
+crate::base::opaque_debug!(SystemRunner);
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;

@@ -236,6 +236,8 @@ impl BacklogWorker {
     }
 }
 
+crate::base::opaque_debug!(BacklogWorker, WorkerHandle);
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;

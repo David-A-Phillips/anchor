@@ -202,7 +202,7 @@ fn performance_and_footprint_budgets() {
                             round % FILES_PER_REPO,
                             round % 12
                         ),
-                        _ => format!("What depends on step_{}_3?", worker),
+                        _ => format!("What depends on step_{worker}_3?"),
                     };
                     let mut request = QueryRequest::new(question);
                     request.mode = QueryMode::RetrievalOnly;

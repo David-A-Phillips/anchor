@@ -32,7 +32,7 @@ pub mod usage;
 
 // Available to every module that declares its own closed vocabulary.
 #[allow(unused_imports)]
-pub(crate) use macros::string_enum;
+pub(crate) use macros::{opaque_debug, string_enum};
 
 pub use db::{Db, Migration, MigrationSet};
 pub use embedding::{EmbedKind, Embedder};

@@ -528,6 +528,8 @@ impl TieredRouter {
     }
 }
 
+crate::base::opaque_debug!(TieredRouter);
+
 #[cfg(test)]
 mod tests {
     use axum::routing::{get, post};

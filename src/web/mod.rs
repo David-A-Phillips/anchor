@@ -369,3 +369,5 @@ pub async fn serve(engine: Arc<Engine>, query: QueryEngine) -> Result<()> {
     axum::serve(listener, router(WebState { engine, query })).await?;
     Ok(())
 }
+
+crate::base::opaque_debug!(WebState);

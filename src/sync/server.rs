@@ -570,3 +570,5 @@ impl AnchorSync for Grpc {
         Ok(GrpcResponse::new(Box::pin(stream)))
     }
 }
+
+crate::base::opaque_debug!(ServerOptions, SyncServer);

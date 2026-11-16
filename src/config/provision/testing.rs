@@ -184,7 +184,8 @@ use futures_util::StreamExt as _;
 async fn pull(State(state): State<Arc<FakeOllamaState>>, body: axum::Json<Value>) -> Response {
     let model = body["model"].as_str().unwrap_or_default().to_owned();
     lock(&state.pulls).push(model.clone());
-    if let Some(message) = lock(&state.pull_error).clone() {
+    let pull_error = lock(&state.pull_error).clone();
+    if let Some(message) = pull_error {
         return ndjson(
             vec![
                 json!({ "status": "pulling manifest" }),
@@ -199,7 +200,8 @@ async fn pull(State(state): State<Arc<FakeOllamaState>>, body: axum::Json<Value>
             models.push(model.clone());
         }
     }
-    if let Some(dir) = lock(&state.models_dir).clone() {
+    let models_dir = lock(&state.models_dir).clone();
+    if let Some(dir) = models_dir {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(blob_name(&model)), vec![0u8; 1000]);
     }
@@ -233,7 +235,8 @@ async fn delete_model(
         )
             .into_response();
     }
-    if let Some(dir) = lock(&state.models_dir).clone() {
+    let models_dir = lock(&state.models_dir).clone();
+    if let Some(dir) = models_dir {
         let _ = std::fs::remove_file(dir.join(blob_name(&model)));
     }
     StatusCode::OK.into_response()
@@ -323,7 +326,8 @@ impl FakeLauncher {
 #[async_trait]
 impl ProcessControl for FakeLauncher {
     async fn spawn(&self, spec: &LaunchSpec) -> io::Result<u32> {
-        if let Some(message) = lock(&self.fail_spawn).clone() {
+        let fail_spawn = lock(&self.fail_spawn).clone();
+        if let Some(message) = fail_spawn {
             return Err(io::Error::other(message));
         }
         let server = if *lock(&self.never_healthy) {
@@ -354,7 +358,8 @@ impl ProcessControl for FakeLauncher {
     }
 
     fn signal(&self, pid: u32, _signal: StopSignal) -> io::Result<()> {
-        if let Some(Some(server)) = lock(&self.inner).servers.remove(&pid) {
+        let removed = lock(&self.inner).servers.remove(&pid);
+        if let Some(Some(server)) = removed {
             server.stop();
         }
         Ok(())
@@ -556,20 +561,20 @@ pub fn free_port() -> u16 {
 impl TestRig {
     /// Rig without a system `ollama`.
     pub async fn new() -> io::Result<Self> {
-        Self::build(None, FakeDownloadServer::start_release().await?).await
+        Self::build(None, FakeDownloadServer::start_release().await?)
     }
 
     /// Rig where `ollama` is found on `PATH` at `binary`.
     pub async fn with_system_binary(binary: PathBuf) -> io::Result<Self> {
-        Self::build(Some(binary), FakeDownloadServer::start_release().await?).await
+        Self::build(Some(binary), FakeDownloadServer::start_release().await?)
     }
 
     /// Rig with a custom download server (hostile archives, wrong checksums).
-    pub async fn with_downloads(downloads: FakeDownloadServer) -> io::Result<Self> {
-        Self::build(None, downloads).await
+    pub fn with_downloads(downloads: FakeDownloadServer) -> io::Result<Self> {
+        Self::build(None, downloads)
     }
 
-    async fn build(system: Option<PathBuf>, downloads: FakeDownloadServer) -> io::Result<Self> {
+    fn build(system: Option<PathBuf>, downloads: FakeDownloadServer) -> io::Result<Self> {
         let dir = tempfile::tempdir()?;
         let port = free_port();
         let config = OllamaConfig {
@@ -610,3 +615,5 @@ impl TestRig {
         self.manager.layout().root()
     }
 }
+
+crate::base::opaque_debug!(FakeOllama, FakeLauncher, FakeDownloadServer, TestRig);

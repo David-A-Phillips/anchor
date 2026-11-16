@@ -143,7 +143,7 @@ impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
             .field("data_dir", &self.paths.root())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -210,7 +210,7 @@ impl Engine {
         )?);
         let router = TieredRouter::from_config(&config.models, ledger.clone(), &process_env)?
             .with_spend_tracker(Arc::new(LedgerSpend(ledger.clone())));
-        let backlog = Arc::new(Backlog::new(db.clone(), &config.backlog));
+        let backlog = Arc::new(Backlog::new(db, &config.backlog));
         let (events, _) = broadcast::channel(1024);
 
         Ok(Arc::new(Self {
@@ -503,7 +503,7 @@ impl Engine {
         let candidates: Vec<(ChunkId, ContentHash)> = chunks
             .iter()
             .filter(|(_, _, text)| !text.trim().is_empty())
-            .map(|(id, hash, _)| (*id, hash.clone()))
+            .map(|(id, hash, _)| (*id, *hash))
             .collect();
         let report = index_chunks(
             self.embedder.as_ref(),
@@ -596,7 +596,7 @@ impl Engine {
             // Derived facts are produced by `enrich`, not by scanning anything.
             SourceKind::Derived => complete = false,
             SourceKind::Repo => {
-                complete = self.scan_repo(source, &root, &mut report, &mut produced)?
+                complete = self.scan_repo(source, &root, &mut report, &mut produced)?;
             }
             SourceKind::Wiki => self.apply_output(
                 wiki::scan_wiki(&root, id, &Default::default())?,
@@ -1268,7 +1268,7 @@ mod tests {
             .failing
             .store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(engine.embed_pending().await.expect("recovered") > 0);
-        assert!(engine.vectors().len() > 0);
+        assert!(!engine.vectors().is_empty());
         assert!(engine.pending_chunks.lock().is_empty());
         assert_eq!(engine.embed_pending().await.expect("idle"), 0);
     }

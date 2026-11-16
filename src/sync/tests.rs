@@ -347,6 +347,17 @@ fn the_hello_debug_output_never_contains_the_bearer_token() {
     assert!(printed.contains("redacted"));
 }
 
+#[test]
+fn option_structs_holding_the_bearer_token_do_not_print_it() {
+    let server = ServerOptions::new(
+        Arc::new(DeviceIdentity::generate()),
+        Some("s3cret-token".to_owned()),
+    );
+    let printed = format!("{server:?}");
+    assert!(printed.contains("ServerOptions"), "{printed}");
+    assert!(!printed.contains("s3cret-token"), "{printed}");
+}
+
 fn graph_store(
     sources: &[(&str, TrustLevel)],
 ) -> (GraphStore, Arc<Mutex<ContextGraph>>, Arc<GraphUnitStore>) {

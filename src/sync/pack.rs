@@ -576,6 +576,15 @@ fn truncated(err: io::Error, what: &str) -> Error {
     }
 }
 
+impl<R: Read> std::fmt::Debug for PackReader<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackReader")
+            .field("manifest", &self.manifest)
+            .field("raw_read", &self.raw_read)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Read> PackReader<R> {
     /// Reads and verifies the header, manifest and signature. Nothing of the payload is read yet.
     ///
@@ -868,6 +877,8 @@ impl<R: Read> Iterator for PackReader<R> {
         }
     }
 }
+
+crate::base::opaque_debug!(@'a; PackWriter<'a>);
 
 #[cfg(test)]
 pub(crate) mod tests {

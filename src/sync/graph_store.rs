@@ -123,3 +123,5 @@ impl UnitStore for GraphUnitStore {
         Ok(report)
     }
 }
+
+crate::base::opaque_debug!(GraphUnitStore);

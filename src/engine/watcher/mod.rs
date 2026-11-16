@@ -123,3 +123,5 @@ impl Drop for FileWatcher {
         self.stop();
     }
 }
+
+crate::base::opaque_debug!(FileWatcher);
