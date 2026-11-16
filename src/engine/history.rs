@@ -42,9 +42,15 @@ pub const ATTR_CHANGE_TYPE: &str = "change_type";
 pub const ATTR_FILES_CHANGED: &str = "files_changed";
 
 const MAX_MESSAGE_CHARS: usize = 4_000;
-const RECORD: char = '\u{1e}';
-const FIELD: char = '\u{1f}';
-const FORMAT: &str = "--pretty=format:%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%B%x1f";
+/// Separator of the fields of one `git log` record. NUL is the only byte git guarantees cannot
+/// occur in a commit message, an author name or an e-mail address, so a hostile commit cannot
+/// inject a forged record or shift the fields of its own (any other separator can be typed into
+/// a commit message).
+const SEP: char = '\0';
+/// Fields per record: hash, author name, e-mail, date, message, and the changed-file listing
+/// that `--name-only` appends after the format.
+const FIELDS: usize = 6;
+const FORMAT: &str = "--pretty=format:%x00%H%x00%an%x00%ae%x00%aI%x00%B%x00";
 
 /// Git history settings (`[history]`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,36 +132,37 @@ pub fn is_work_tree(root: &Path) -> bool {
 }
 
 fn parse_log(output: &str) -> Vec<CommitInfo> {
-    output
-        .split(RECORD)
-        .filter_map(|record| {
-            let mut fields = record.split(FIELD);
-            let sha = fields.next()?.trim();
-            if sha.len() < 7 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return None;
-            }
-            let author = fields.next()?.trim().to_owned();
-            let email = fields.next()?.trim().to_owned();
-            let date = fields.next()?.trim().to_owned();
-            let message = fields.next()?.trim().to_owned();
-            let files = fields
-                .next()
-                .unwrap_or("")
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(keys::normalize_path)
-                .collect();
-            Some(CommitInfo {
-                sha: sha.to_owned(),
-                author,
-                email,
-                date,
-                message,
-                files,
-            })
-        })
-        .collect()
+    let tokens: Vec<&str> = output.split(SEP).collect();
+    let mut commits = Vec::new();
+    let mut at = 0;
+    while at < tokens.len() {
+        let sha = tokens[at].trim();
+        let is_sha = sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit());
+        // A record needs its five format fields; anything shorter is a truncated tail.
+        if !is_sha || at + 4 >= tokens.len() {
+            at += 1;
+            continue;
+        }
+        let files = tokens
+            .get(at + 5)
+            .copied()
+            .unwrap_or("")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(keys::normalize_path)
+            .collect();
+        commits.push(CommitInfo {
+            sha: sha.to_owned(),
+            author: tokens[at + 1].trim().to_owned(),
+            email: tokens[at + 2].trim().to_owned(),
+            date: tokens[at + 3].trim().to_owned(),
+            message: tokens[at + 4].trim().to_owned(),
+            files,
+        });
+        at += FIELDS;
+    }
+    commits
 }
 
 /// The most recent `max` commits touching `root` (a repository or a directory inside one),
@@ -539,7 +546,7 @@ mod tests {
     #[test]
     fn log_output_is_parsed_into_commits() {
         let output = format!(
-            "{RECORD}{sha}{FIELD}Alice Smith{FIELD}alice@example.com{FIELD}2025-03-01T10:00:00+00:00{FIELD}PAY-1: first\n\nBody line.\n{FIELD}\nsrc/a.rs\nREADME.md\n\n{RECORD}{sha2}{FIELD}Bob{FIELD}1+bob@users.noreply.github.com{FIELD}2025-03-02T10:00:00+00:00{FIELD}second{FIELD}",
+            "{SEP}{sha}{SEP}Alice Smith{SEP}alice@example.com{SEP}2025-03-01T10:00:00+00:00{SEP}PAY-1: first\n\nBody line.\n{SEP}\nsrc/a.rs\nREADME.md\n\n{SEP}{sha2}{SEP}Bob{SEP}1+bob@users.noreply.github.com{SEP}2025-03-02T10:00:00+00:00{SEP}second{SEP}",
             sha = "a".repeat(40),
             sha2 = "b".repeat(40)
         );
