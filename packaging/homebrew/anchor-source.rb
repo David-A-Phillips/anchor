@@ -15,7 +15,7 @@ class Anchor < Formula
 
   def install
     system "cargo", "install", *std_cargo_args
-    generate_completions_from_executable(bin/"anchor", "completions", shells: [:bash, :zsh, :fish])
+    generate_completions_from_executable(bin/"anchor", "completions")
     (man1/"anchor.1").write Utils.safe_popen_read(bin/"anchor", "man")
   end
 

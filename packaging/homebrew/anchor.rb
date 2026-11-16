@@ -10,7 +10,6 @@
 class Anchor < Formula
   desc "Local-first context engine that grounds AI models in your codebases"
   homepage "https://github.com/OWNER/anchor"
-  version "0.1.0"
   # TODO(owner): the real SPDX license identifier (brew audit requires one).
   license "TODO(owner)"
 
@@ -36,7 +35,7 @@ class Anchor < Formula
 
   def install
     bin.install "anchor"
-    generate_completions_from_executable(bin/"anchor", "completions", shells: [:bash, :zsh, :fish])
+    generate_completions_from_executable(bin/"anchor", "completions")
     (man1/"anchor.1").write Utils.safe_popen_read(bin/"anchor", "man")
   end
 
