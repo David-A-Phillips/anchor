@@ -525,11 +525,32 @@ pub struct TestRig {
     pub config: OllamaConfig,
 }
 
-/// A loopback port that is free right now.
+/// A loopback port that is free right now and will not be handed to anyone else in this process.
+///
+/// Binding port `0` and closing the socket again is racy: the kernel may hand the same ephemeral
+/// port to the next `bind(0)` of any concurrently running test (a fake download server, another
+/// rig) before the caller uses it, so tests saw each other's servers ("address already in use", or
+/// a server that was meant to be absent answering). Ports are therefore drawn from a private range
+/// below the OS ephemeral range through a process-wide counter: no `bind(0)` can land on them and
+/// no two callers receive the same port. Each candidate is still probed, to skip ports held by
+/// unrelated processes.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .and_then(|listener| listener.local_addr())
-        .map_or(0, |addr| addr.port())
+    use std::sync::atomic::AtomicU32;
+    const FIRST: u32 = 16_000;
+    const SPAN: u32 = 12_000;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    // Different test binaries and re-runs start at different offsets within the range.
+    let start = std::process::id().wrapping_mul(2_654_435_761) % SPAN;
+    for _ in 0..SPAN {
+        let step = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = FIRST + (start + step) % SPAN;
+        if let Ok(port) = u16::try_from(port)
+            && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+        {
+            return port;
+        }
+    }
+    0
 }
 
 impl TestRig {
