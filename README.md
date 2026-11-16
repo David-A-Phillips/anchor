@@ -42,6 +42,9 @@ curl -fsSL https://raw.githubusercontent.com/David-A-Phillips/anchor/main/script
 cargo build --release                    # from source: Rust 1.88+ and a C compiler
 ```
 
+On Windows, download the zip from the release: it has `anchor.exe` and `anchor-service.exe`, which
+runs Anchor as a Windows service (`anchor-service.exe install`, then `start`).
+
 The package is called `anchor-context` (other distributions' `anchor` packages are unrelated);
 the command is `anchor`. [docs/install.md](docs/install.md) has the repository setup for apt and
 dnf, upgrade and removal, running as a systemd or Homebrew service, Docker, and Windows.
@@ -49,8 +52,8 @@ dnf, upgrade and removal, running as a systemd or Homebrew service, Docker, and 
 No release has been published yet, and the repository is private, so the package commands above
 do not work until a release exists and its assets are publicly downloadable;
 [RELEASING.md](RELEASING.md) lists what a release needs. The `.deb`, `.rpm` and Homebrew formula
-have been built and installed in local containers on Linux x86_64; macOS, Windows and arm64 have
-not been built.
+have been built and installed in local containers on Linux x86_64. macOS and Windows build in
+CI; apart from the Windows service test there, neither has been run.
 
 ## Run it locally
 

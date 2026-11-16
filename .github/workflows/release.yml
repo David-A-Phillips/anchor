@@ -77,6 +77,37 @@ jobs:
           tool: cargo-auditable${{ matrix.linux && ',cargo-deb,cargo-generate-rpm' || '' }}
       - name: Build
         run: cargo auditable build --release --locked --target ${{ matrix.target }}
+      - name: Build the Windows service host
+        if: runner.os == 'Windows'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p anchor-winsvc
+      # The runner is elevated, so the service can really be registered: install it, start it,
+      # check that the daemon it supervises answers on the dashboard port, stop and remove it.
+      - name: Test running as a Windows service
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "target\${{ matrix.target }}\release"
+          & "$dir\anchor-service.exe" install --mode daemon
+          if ($LASTEXITCODE -ne 0) { throw "install failed" }
+          & "$dir\anchor-service.exe" start
+          $started = $LASTEXITCODE
+          $ok = $false
+          for ($i = 0; $i -lt 40 -and $started -eq 0; $i++) {
+            try {
+              $r = Invoke-RestMethod http://127.0.0.1:7890/api/health -TimeoutSec 2
+              if ($r.status -eq 'ok') { $ok = $true; break }
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+          sc.exe query Anchor
+          & "$dir\anchor-service.exe" stop
+          $stopped = $LASTEXITCODE
+          & "$dir\anchor-service.exe" uninstall
+          Get-ChildItem C:\ProgramData\Anchor\logs -ErrorAction SilentlyContinue | ForEach-Object { "--- $($_.Name)"; Get-Content $_.FullName -Tail 40 }
+          if ($started -ne 0) { throw "the service did not start" }
+          if (-not $ok) { throw "the daemon under the service did not answer on 127.0.0.1:7890" }
+          if ($stopped -ne 0) { throw "the service did not stop" }
+          "Windows service: install, start, health check, stop and uninstall all passed." >> $env:GITHUB_STEP_SUMMARY
       - name: Package archive
         shell: bash
         env:
@@ -87,6 +118,7 @@ jobs:
           mkdir -p "dist/${name}"
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/anchor.exe" "dist/${name}/"
+            cp "target/${{ matrix.target }}/release/anchor-service.exe" "dist/${name}/"
           else
             cp "target/${{ matrix.target }}/release/anchor" "dist/${name}/"
           fi
@@ -145,10 +177,11 @@ jobs:
         run: |
           if [ -z "${KEY}" ]; then
             echo "No REPO_GPG_PRIVATE_KEY secret: repositories will be unsigned."
-            if [ "${{ needs.meta.outputs.publish }}" = "true" ]; then
+            if [ "${{ needs.meta.outputs.publish }}" = "true" ] && [ "${{ vars.PAGES_ENABLED }}" = "true" ]; then
               echo "::error::refusing to publish unsigned repositories; set REPO_GPG_PRIVATE_KEY"
               exit 1
             fi
+            echo "::warning::no signing key: the apt and dnf repositories are built unsigned and not published"
             exit 0
           fi
           printf '%s' "${KEY}" | gpg --batch --import
@@ -267,10 +300,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A version with a pre-release part (0.1.1-beta) is published as a pre-release.
+          flags=()
+          case "${GITHUB_REF_NAME}" in *-*) flags+=(--prerelease) ;; esac
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+            --title "Anchor ${GITHUB_REF_NAME#v}" \
+            --generate-notes "${flags[@]}"
       - uses: actions/upload-artifact@v4
         if: needs.meta.outputs.publish != 'true'
         with:

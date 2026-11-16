@@ -14,7 +14,7 @@ unrelated packages called `anchor`; the command it installs is still `anchor`.
 | [4. Install script](#4-install-script) | Linux, macOS | Linux x86_64 tested |
 | [5. Docker](#5-team-server-in-docker) | any (team server) | tested |
 | [6. Cargo](#6-cargo-and-from-source) | any with Rust | from source tested; `cargo binstall` untested |
-| [7. Windows](#7-windows) | Windows x86_64 | untested |
+| [7. Windows](#7-windows) | Windows x86_64 | built and service-tested in CI; otherwise untested |
 
 A managed Ollama install (`anchor setup`) is Linux-only; elsewhere install Ollama yourself and
 point `ollama.base_url` at it. The `git` command-line tool is an optional runtime dependency
@@ -198,22 +198,50 @@ command (`--force` for `cargo install`). **Uninstall:** `cargo uninstall anchor`
 
 ## 7. Windows
 
-Not yet exercised on real Windows machines (the release workflow builds the archive).
+The release has `anchor-<version>-x86_64-pc-windows-msvc.zip` with two programs: `anchor.exe`
+(the command-line tool) and `anchor-service.exe` (runs Anchor as a Windows service).
 
 ```powershell
-# Manual: download anchor-<version>-x86_64-pc-windows-msvc.zip from the GitHub Release,
-# verify it against the .sha256 file, unpack it and put anchor.exe on your PATH.
-
-# Scoop (manifest in packaging/scoop/anchor.json; add it to a bucket first):
-scoop install https://raw.githubusercontent.com/David-A-Phillips/anchor/main/packaging/scoop/anchor.json
-
-# winget (after the manifest in packaging/winget/ is accepted by winget-pkgs):
-winget install David-A-Phillips.Anchor
+# Download the zip from the GitHub Release, check it against the .sha256 file, unpack it,
+# and put the folder on your PATH (or run the programs from where they are).
+Expand-Archive anchor-<version>-x86_64-pc-windows-msvc.zip -DestinationPath C:\Tools
+C:\Tools\anchor-<version>-x86_64-pc-windows-msvc\anchor.exe --version
 ```
 
-Upgrade: `scoop update anchor` / `winget upgrade David-A-Phillips.Anchor`. Uninstall: `scoop uninstall anchor`
-/ `winget uninstall David-A-Phillips.Anchor`. There is no Windows service wrapper yet; run `anchor daemon` from
-a terminal or a Task Scheduler task.
+### Run as a Windows service
+
+From an elevated (Administrator) PowerShell, in the folder holding both programs:
+
+```powershell
+.\anchor-service.exe install                 # registers the service "Anchor": the daemon, started at boot
+.\anchor-service.exe start
+.\anchor-service.exe status
+.\anchor-service.exe stop
+.\anchor-service.exe uninstall               # keeps configuration and data
+```
+
+- The service runs `anchor.exe daemon` as LocalSystem, restarts it if it exits, and stops it
+  when the service stops. Keep `anchor.exe` next to `anchor-service.exe`, or pass `--exe`.
+- Configuration is `C:\ProgramData\Anchor\anchor.toml` (created on install if missing, with
+  the database under `C:\ProgramData\Anchor\data`); add your `[[sources]]` there and restart
+  the service. Use `--config PATH` to point somewhere else.
+- Logs are in `C:\ProgramData\Anchor\logs`.
+- For a team sync server instead of the daemon: `anchor-service.exe install --mode server
+  --name AnchorSync`. Set `ANCHOR_SYNC_TOKEN` as a system environment variable first.
+- The dashboard is at http://localhost:7890 while the daemon service runs.
+
+The release workflow builds both programs on Windows and tests the service there: install,
+start, a health check against the dashboard, stop and uninstall. Beyond that the Windows build
+has not been used on a real machine, and the tool's tests run on Linux only. Two things are
+Linux-only: the managed Ollama install (install Ollama yourself and set `ollama.base_url`) and
+graceful shutdown of the service (the daemon is ended, which is safe for the database).
+
+Package managers (manifests in `packaging/`, untested, and they install `anchor.exe` only):
+
+```powershell
+scoop install https://raw.githubusercontent.com/David-A-Phillips/anchor/main/packaging/scoop/anchor.json
+winget install David-A-Phillips.Anchor      # after the manifest is accepted by winget-pkgs
+```
 
 Arch Linux: `packaging/aur/PKGBUILD` (package `anchor-context-bin`, untested). Nix:
 `packaging/nix/flake.nix` (untested).

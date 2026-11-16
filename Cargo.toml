@@ -1,6 +1,10 @@
+[workspace]
+members = ["crates/anchor-winsvc"]
+resolver = "3"
+
 [package]
 name = "anchor"
-version = "0.1.0"
+version = "0.1.1-beta"
 edition = "2024"
 rust-version = "1.88"
 description = "Local-first context engine and synchronization daemon that grounds AI models in multi-repository codebases, enterprise domains, wikis, API approval portals and trackers."

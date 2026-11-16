@@ -1,0 +1,16 @@
+[package]
+name = "anchor-winsvc"
+version = "0.1.1-beta"
+edition = "2024"
+rust-version = "1.88"
+description = "Windows service host for Anchor: runs `anchor daemon` or `anchor server` under the Service Control Manager."
+license = "MIT"
+repository = "https://github.com/David-A-Phillips/anchor"
+publish = false
+
+[[bin]]
+name = "anchor-service"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"

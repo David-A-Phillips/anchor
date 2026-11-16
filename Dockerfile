@@ -17,6 +17,7 @@ RUN mkdir -p src benches && echo 'fn main() {}' > src/main.rs && echo '' > src/l
     && echo 'fn main() {}' > benches/engine.rs \
     && cargo build --release --locked || true
 COPY src ./src
+COPY crates ./crates
 COPY benches ./benches
 RUN touch src/main.rs src/lib.rs && cargo build --release --locked --bin anchor
 

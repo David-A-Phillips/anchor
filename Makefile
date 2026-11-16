@@ -17,6 +17,9 @@ CARGO ?= cargo
 RELEASE_DIR := target/$(TARGET)/release
 DIST := target/dist
 ARCHIVE := anchor-$(VERSION)-$(TARGET)
+# Package version for dpkg and rpm: a pre-release such as 0.1.1-beta becomes 0.1.1~beta, which
+# both sort before 0.1.1 (and rpm does not accept `-` in a version at all).
+PKG_VERSION := $(subst -,~,$(VERSION))
 
 .PHONY: test-apt test-rpm build assets archive package-deb package-rpm apt-repo rpm-repo dist checksums clean-dist
 
@@ -37,11 +40,13 @@ archive: build
 	rm -rf $(DIST)/$(ARCHIVE)
 
 package-deb: assets
-	cargo deb --no-build --target $(TARGET) --output $(DIST)/
+	rm -f $(DIST)/*.deb
+	cargo deb --no-build --target $(TARGET) --deb-version $(PKG_VERSION)-1 --output $(DIST)/
 	@ls -l $(DIST)/*.deb
 
 package-rpm: assets
-	cargo generate-rpm --target $(TARGET) --output $(DIST)/
+	rm -f $(DIST)/*.rpm
+	cargo generate-rpm --target $(TARGET) --set-metadata 'version = "$(PKG_VERSION)"' --output $(DIST)/
 	@ls -l $(DIST)/*.rpm
 
 apt-repo:
