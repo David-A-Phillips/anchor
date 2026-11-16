@@ -120,7 +120,10 @@ The exact accepted formats are documented at the top of each parser module under
 | `anchor spend [--days N]` | Token usage and estimated cost, local vs. cloud |
 | `anchor backlog` | Open gap-analysis items |
 | `anchor enrich [--limit N]` | Summarise and tag pages, tickets, PRs and APIs with the local model |
+| `anchor why TARGET [--json]` | Why is this code the way it is: blame, then commit → pull request → review → ticket → pages |
 | `anchor mcp` | Serve the Model Context Protocol on stdio, for agents (Claude Code, Cursor, …) |
+| `anchor mcp install [--client …] [--print]` | Register the MCP server with Claude Code, Claude Desktop or Cursor |
+| `anchor fetch-atlassian [URL]` | Export Confluence spaces and Jira projects (incremental; see `docs/atlassian.md`) |
 | `anchor eval --truth FILE` | Score the engine against questions with known answers |
 | `anchor compare DIR [--truth FILE] [--reindex] [--kinds]` | Score Anchor next to plain retrieval and other RAG systems: quality, latency, disk and memory |
 | `anchor fetch OWNER/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
@@ -153,13 +156,72 @@ JSON API: `/api/health`, `/api/stats`, `/api/graph/search?q=`, `/api/graph/node/
 `POST /api/backlog/{id}/{resolve|dismiss|reopen|retry}`, `/api/spend?days=`,
 `POST /api/sources/{id}/rescan`, `POST /api/export`.
 
+## Why is this code the way it is (`anchor why`)
+
+`anchor why` is a deeper git blame. It blames the lines you ask about, then follows each
+responsible commit through the graph and reports the whole trail:
+
+```
+$ anchor why src/charge.rs:3
+ledger:src/charge.rs lines 3-3 (by blame)
+
+commit 4f2a9c1e07 by Alice Smith on 2025-03-01 — 1 line(s)
+  PAY-12: retry charges with a bounded backoff (#7)
+  | The gateway drops one request in a thousand under load.
+  pull request pr:ledger#7 "Retry charges" [merged]
+    Implements PAY-12.
+    - Review of ledger#7 by bob: dismissed: Unbounded retries will hammer the gateway. — dismissed: Dismissed: the retry count is capped at three in the follow-up commit. (by carol)
+  ticket PAY-12 "Charges fail intermittently under load" [done]
+    Roughly 0.1% of charge requests are dropped by the gateway.
+  - wiki_page "Gateway incident review" [reference_only] discusses PAY-12
+```
+
+The target is `path`, `path:line`, `path:start-end`, `source:path` (when the same path exists in
+several repositories) or a symbol name. Blame runs on demand with the `git` command line, so it
+works at any depth and nothing is stored per line. Where the trail ends early (a commit pushed
+without a pull request, a ticket that was never ingested) the report says so. The same report
+is available to agents as the `why` MCP tool. No model is involved.
+
+Repositories held at full depth also get their recent history in the graph: each commit is a
+node linked to its author, the files it changed, and the tickets (`PAY-123`) and pull requests
+(`#123`) its message names, and is tagged with the kind of change it announces (`fix`, `revert`,
+`feature`, `security`, ...). Configure with:
+
+```toml
+[history]
+enabled = true
+max_commits = 2000            # most recent commits per repository; older ones are still reached by blame
+max_files_per_commit = 30     # larger commits keep the count, not the file links
+```
+
+For the trail to reach reviews and tickets, ingest them too: `anchor fetch OWNER/REPO` for GitHub
+pull requests, a `jira` source or `anchor fetch-atlassian` for tickets and wiki pages.
+
+## Confluence and Jira
+
+`anchor fetch-atlassian` exports Confluence spaces (pages, labels, hierarchy, footer and inline
+comments with their resolution) and Jira projects into the layouts the `wiki` and `jira` sources
+read, incrementally and resumably, for Cloud and Data Center. Pages with read restrictions are
+skipped unless you opt in. Credentials come from environment variables, never from the file.
+See [`docs/atlassian.md`](docs/atlassian.md). The connector is tested against a mock of the
+Atlassian APIs only; it has not been run against a real site yet.
+
+## Installing and sharing
+
+[`docs/install.md`](docs/install.md) covers the install script, the Docker image for a team
+sync server, `anchor mcp install`, and sharing a graph with a teammate (server URL and token, or
+a `.contextpack` file). Release builds for Linux, macOS and Windows are defined in
+`.github/workflows/release.yml`; they have not run yet, and only Linux x86_64 has been built
+and tested.
+
 ## Using Anchor from an agent (MCP)
 
 `anchor mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio,
 the interface agent hosts such as Claude Code, Claude Desktop and Cursor speak. It opens the same
 database as the CLI and the daemon, and can run alongside the daemon.
 
-Claude Code:
+`anchor mcp install` registers the server with Claude Code, Claude Desktop and Cursor
+(`--print` shows what it would change). By hand, for Claude Code:
 
 ```sh
 claude mcp add anchor -- anchor mcp
@@ -179,6 +241,7 @@ Any other host, in its MCP server configuration:
 | `search` | Find entities by name or alias, optionally of one kind |
 | `get` | One entity: attributes, asserting sources, relationships, text |
 | `path` | The most trustworthy chain of relationships between two entities |
+| `why` | A deeper git blame: lines → commits → pull request, review decisions, tickets, pages |
 | `deepen` | Ingest a shallow source more deeply; call it when `ask` lists the source under `shallow`, then ask again |
 | `status` | Sources with their kind, trust and depth; entity counts |
 
