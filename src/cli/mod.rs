@@ -178,7 +178,11 @@ enum Command {
         file: PathBuf,
     },
     /// Serve the Model Context Protocol on stdio, for agent hosts such as Claude Code.
-    Mcp,
+    Mcp {
+        /// Optional management action; plain `anchor mcp` serves.
+        #[command(subcommand)]
+        action: Option<McpAction>,
+    },
     /// Run the central sync server (WebSocket and gRPC on `sync.listen`).
     Server,
     /// Synchronise once with the configured sync server and print the result.
@@ -271,6 +275,43 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Actions of `anchor mcp`.
+#[derive(Subcommand, Debug)]
+enum McpAction {
+    /// Register this binary as an MCP server with Claude Code, Claude Desktop or Cursor.
+    Install(crate::mcp::install::InstallArgs),
+    /// Remove the registration made by `install`.
+    Uninstall(crate::mcp::install::UninstallArgs),
+}
+
+fn run_mcp_action(action: McpAction, config: &Option<PathBuf>) -> Result<()> {
+    use crate::mcp::install;
+    let locations = install::Locations::system()?;
+    let lines = match action {
+        McpAction::Install(args) => {
+            let exe = std::env::current_exe()
+                .map_err(|err| Error::config(format!("cannot locate this executable: {err}")))?;
+            let config = config
+                .as_ref()
+                .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()));
+            install::install(
+                &args,
+                &exe,
+                config.as_deref(),
+                &locations,
+                &install::SystemRunner,
+            )?
+        }
+        McpAction::Uninstall(args) => {
+            install::uninstall(&args, &locations, &install::SystemRunner)?
+        }
+    };
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn load_config(path: &Option<PathBuf>) -> Result<(AnchorConfig, PathBuf)> {
@@ -681,7 +722,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let applied = tokio::task::spawn_blocking(move || engine.import_pack(&file)).await??;
             println!("Applied {applied} unit versions.");
         }
-        Command::Mcp => {
+        Command::Mcp {
+            action: Some(action),
+        } => run_mcp_action(action, &cli.config)?,
+        Command::Mcp { action: None } => {
             let (config, _) = load_config(&cli.config)?;
             let engine = open_engine(config).await?;
             install_remote(&engine)?;

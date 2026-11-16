@@ -1,0 +1,46 @@
+# Anchor team sync server.
+#
+#   export ANCHOR_SYNC_TOKEN="$(openssl rand -hex 32)"
+#   docker compose -f packaging/docker-compose.yml up -d --build
+#
+# Teammates then use:  server_url = "ws://HOST:7891/sync"  (or wss://anchor.example.com/sync
+# behind the Caddy proxy below) and the same token in the env var named by sync.auth_token_env.
+#
+# NOTE: the anchor service was smoke-tested with plain `docker run`; this compose file and the
+# Caddy service were not run.
+
+services:
+  anchor:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Required: clients must send this bearer token.
+      ANCHOR_SYNC_TOKEN: ${ANCHOR_SYNC_TOKEN:?set ANCHOR_SYNC_TOKEN to a long random string}
+    volumes:
+      - anchor-data:/data
+    # Plain WebSocket/gRPC on 7891. With the TLS proxy below, change this to "127.0.0.1:7891:7891".
+    ports:
+      - "7891:7891"
+
+  # Anchor does not terminate TLS. For use outside a trusted network, terminate it here.
+  # Enable with `--profile tls`. Replace anchor.example.com (in Caddyfile) with a DNS name
+  # pointing at this host;
+  # Caddy obtains and renews the certificate automatically.
+  caddy:
+    image: caddy:2
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on: [anchor]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  anchor-data:
+  caddy-data:
+

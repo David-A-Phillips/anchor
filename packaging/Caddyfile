@@ -1,0 +1,6 @@
+anchor.example.com {
+	reverse_proxy anchor:7891
+}
+
+# For gRPC clients (sync.transport = "grpc") use instead:
+#   reverse_proxy h2c://anchor:7891

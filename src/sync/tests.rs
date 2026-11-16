@@ -523,6 +523,49 @@ async fn change_notifications_trigger_a_resync() {
     }
 }
 
+/// The server terminates no TLS itself (deployments put a TLS-terminating proxy in front), so
+/// what is verified here is the client side: `wss://` and `https://` URLs make the client open
+/// with a TLS ClientHello (record type 0x16), while `ws://` and `http://` do not.
+#[tokio::test]
+async fn client_speaks_tls_for_secure_urls_and_plaintext_otherwise() {
+    use tokio::io::AsyncReadExt as _;
+
+    let cases = [
+        (SyncTransport::WebSocket, "wss://", true),
+        (SyncTransport::WebSocket, "ws://", false),
+        (SyncTransport::Grpc, "https://", true),
+        (SyncTransport::Grpc, "http://", false),
+    ];
+    for (transport, scheme, expect_tls) in cases {
+        let probe = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = probe.local_addr().expect("addr");
+        let first = tokio::spawn(async move {
+            let (mut socket, _) = probe.accept().await.expect("accept");
+            let mut byte = [0u8; 1];
+            socket.read_exact(&mut byte).await.expect("first byte");
+            byte[0]
+            // Dropping the socket aborts the client's handshake.
+        });
+        // Reuse the option builder; only the URL and timeouts matter here.
+        let dummy = Server {
+            addr,
+            stop: None,
+            task: tokio::spawn(async {}),
+        };
+        let mut options = dummy.options(transport, Some("t"), &[], &[]);
+        options.url = format!("{scheme}{addr}");
+        options.connect_timeout = Duration::from_secs(2);
+        options.io_timeout = Duration::from_secs(2);
+        let client = SyncClient::new(memory(vec![], &[]), options);
+        assert!(client.sync_once().await.is_err());
+        let byte = tokio::time::timeout(Duration::from_secs(5), first)
+            .await
+            .expect("probe timed out")
+            .expect("probe");
+        assert_eq!(byte == 0x16, expect_tls, "{scheme}: first byte {byte:#x}");
+    }
+}
+
 #[tokio::test]
 async fn token_lookup_is_injectable_and_comparison_exact() {
     assert_eq!(

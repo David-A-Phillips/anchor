@@ -1,0 +1,14 @@
+target
+.git
+.github
+.claude
+docs
+scripts
+tests
+proptest-regressions
+packaging/*
+!packaging/docker
+*.md
+!README.md
+Dockerfile
+.dockerignore

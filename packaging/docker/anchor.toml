@@ -1,0 +1,8 @@
+# Config baked into the Anchor server image (/etc/anchor/anchor.toml).
+# The data directory (database, device keys, packs) is /data via ANCHOR_HOME.
+mode = "server"
+
+[sync]
+listen = "0.0.0.0:7891"
+# Clients must present this token as a bearer token. Set it in the container environment.
+auth_token_env = "ANCHOR_SYNC_TOKEN"
