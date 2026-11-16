@@ -20,7 +20,8 @@ def main():
     documents = SimpleDirectoryReader(str(args.corpus), recursive=True).load_data()
     index = VectorStoreIndex.from_documents(documents)
     nodes = list(index.docstore.docs.values())
-    print(f"indexed {len(documents)} documents as {len(nodes)} chunks in {time.perf_counter() - started:.1f} s")
+    index_seconds = time.perf_counter() - started
+    print(f"indexed {len(documents)} documents as {len(nodes)} chunks in {index_seconds:.1f} s")
 
     vector = index.as_retriever(similarity_top_k=common.TOP_K)
     bm25 = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=common.TOP_K)
@@ -32,6 +33,12 @@ def main():
         def retrieve(question, retriever=retriever):
             return [hit.node.get_content(metadata_mode=MetadataMode.LLM) for hit in retriever.retrieve(question)]
         common.write_results(args.run, f"llamaindex-{name}", common.answer_all(rows, retrieve))
+    if args.index_dir:
+        index.storage_context.persist(persist_dir=str(args.index_dir / "vector"))
+        bm25.persist(str(args.index_dir / "bm25"))
+        common.write_footprint(
+            args.run, ["llamaindex-vector", "llamaindex-bm25", "llamaindex-hybrid"], args.index_dir, index_seconds,
+            "vector + BM25 index together; embedding model runs in Ollama (not counted: 274 MB on disk)")
 
 
 if __name__ == "__main__":

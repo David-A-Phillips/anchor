@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use super::embed::VectorIndex;
 use super::graph::{
-    Direction, Goal, GraphConfig, Limits, Path, Pathfinder, Seed, SharedGraph, TraversalProfile,
+    Direction, Goal, GraphConfig, Limits, Path, PathCost, Pathfinder, Seed, SharedGraph,
+    TraversalProfile,
 };
-use super::router::{RetrievalSignals, TieredRouter};
+use super::router::{RetrievalSignals, TieredRouter, relation};
 use super::store::{GraphStore, NodeRecord, Resolution};
 use crate::backlog::{Backlog, GapReport};
 use crate::base::{
@@ -318,6 +319,9 @@ pub struct QueryEngine {
     depths: Option<Arc<dyn DepthControl>>,
 }
 
+/// Candidates kept for a name that several entities share.
+const AMBIGUOUS_CANDIDATES: usize = 6;
+
 const ENTITY_KINDS: &[NodeKind] = &[
     NodeKind::Service,
     NodeKind::ApiSpec,
@@ -341,6 +345,15 @@ struct Retrieved {
     reports: Vec<GapReport>,
     direct_answer: Option<String>,
     authoritative: bool,
+}
+
+/// "by <who>: " when the node records who closed or dismissed it.
+fn closed_by(node: &NodeRecord) -> String {
+    node.attrs
+        .get(attrs::CLOSED_BY)
+        .and_then(|v| v.as_str())
+        .map(|who| format!("by {who}: "))
+        .unwrap_or_default()
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -473,11 +486,17 @@ impl QueryEngine {
         }
         let mut seeds: Vec<Seed> = Vec::new();
         let mut exact = false;
+        let mut ambiguous: Vec<(String, usize)> = Vec::new();
         let add = |node: NodeId, cost: f32, seeds: &mut Vec<Seed>| {
             if !seeds.iter().any(|seed| seed.node == node) {
                 seeds.push(Seed { node, cost });
             }
         };
+        // Resolve every mention first: a name shared by many entities (`src/lib.rs`, `POST
+        // /v1/refunds`, a sentence quoted from several pages) is then narrowed to the candidates
+        // that belong to an entity the question names unambiguously ("... in billing-api").
+        let mut resolved = Vec::with_capacity(entities.len());
+        let mut scopes: Vec<String> = Vec::new();
         for mention in &entities {
             let kinds: Vec<NodeKind> = match mention.kind_hint {
                 Some(kind) => std::iter::once(kind)
@@ -485,18 +504,95 @@ impl QueryEngine {
                     .collect(),
                 None => ENTITY_KINDS.to_vec(),
             };
-            match store.resolve(&Lookup::new(&kinds, mention.text.clone()))? {
+            let resolution = store.resolve(&Lookup::new(&kinds, mention.text.clone()))?;
+            if let Resolution::Resolved(node) = &resolution
+                && let Some(node) = store.node(*node)?
+            {
+                for key in &node.keys {
+                    if let Some((_, slug)) = key.as_str().rsplit_once(':')
+                        && slug.len() > 2
+                    {
+                        scopes.push(slug.to_lowercase());
+                    }
+                }
+            }
+            resolved.push((mention, resolution));
+        }
+        // A candidate is in scope when its key has a named entity's slug as a whole segment
+        // (`file:billing-api:src/lib.rs`); failing that for every candidate, when a segment
+        // starts with the slug (`thread:wiki:billing-api-runbook/t-1`).
+        let in_scope = |nodes: Vec<NodeId>| -> Result<Vec<NodeId>> {
+            if scopes.is_empty() || nodes.len() < 2 {
+                return Ok(nodes);
+            }
+            let (mut whole, mut prefix) = (Vec::new(), Vec::new());
+            for node in &nodes {
+                let Some(record) = store.node(*node)? else {
+                    continue;
+                };
+                let key = record.key.as_str().to_lowercase();
+                let mut best = 0;
+                for scope in &scopes {
+                    for (at, _) in key.match_indices(scope.as_str()) {
+                        if !matches!(key[..at].chars().next_back(), Some(':' | '/')) {
+                            continue;
+                        }
+                        match key[at + scope.len()..].chars().next() {
+                            None | Some(':' | '/' | '#') => best = 2,
+                            Some('-' | '_' | '.') => best = best.max(1),
+                            _ => {}
+                        }
+                    }
+                }
+                match best {
+                    2 => whole.push(*node),
+                    1 => prefix.push(*node),
+                    _ => {}
+                }
+            }
+            Ok(if !whole.is_empty() {
+                whole
+            } else if !prefix.is_empty() {
+                prefix
+            } else {
+                nodes
+            })
+        };
+        for (mention, resolution) in resolved {
+            match resolution {
                 Resolution::Resolved(node) => {
                     exact = true;
                     add(node, 0.0, &mut seeds);
                 }
                 Resolution::Ambiguous(nodes) => {
-                    for node in nodes.into_iter().take(3) {
-                        add(node, 0.5, &mut seeds);
+                    let nodes = in_scope(nodes)?;
+                    if let [node] = nodes[..] {
+                        exact = true;
+                        add(node, 0.0, &mut seeds);
+                    } else {
+                        ambiguous.push((mention.text.clone(), nodes.len()));
+                        for node in nodes.into_iter().take(AMBIGUOUS_CANDIDATES) {
+                            add(node, 0.5, &mut seeds);
+                        }
                     }
                 }
                 Resolution::NotFound => {
-                    let hits = store.search_nodes(&mention.text, &[], 3)?;
+                    let hits = store.search_nodes(&mention.text, &[], 12)?;
+                    let best = hits.first().map_or(0.0, |hit| hit.score);
+                    let near: Vec<NodeId> = hits
+                        .iter()
+                        .filter(|hit| hit.score >= best - 0.05)
+                        .map(|hit| hit.node)
+                        .collect();
+                    let near = in_scope(near)?;
+                    if near.len() > 1 && best >= 0.7 {
+                        ambiguous.push((mention.text.clone(), near.len()));
+                    }
+                    let hits: Vec<_> = hits
+                        .into_iter()
+                        .filter(|hit| near.contains(&hit.node))
+                        .take(AMBIGUOUS_CANDIDATES)
+                        .collect();
                     if hits.iter().all(|hit| hit.score < 0.7) {
                         gaps.push(Gap {
                             kind: "unresolved_entity".into(),
@@ -550,6 +646,14 @@ impl QueryEngine {
                 path.target().is_some_and(|node| !seed_ids.contains(&node)) || path.steps.is_empty()
             })
             .collect();
+        // A question that names its own path through the graph is answered by following it.
+        let chain = relation::parse(&request.query);
+        let followed = match &chain {
+            Some(chain) => self.follow(chain, &seeds, limits),
+            None => Vec::new(),
+        };
+        let chain = chain.filter(|_| !followed.is_empty());
+        let paths = if chain.is_some() { followed } else { paths };
 
         // 3. Assemble.
         let mut bundle = ContextBundle::default();
@@ -586,7 +690,7 @@ impl QueryEngine {
             Ok(())
         };
 
-        let single_valued = intent.kind == IntentKind::Ownership;
+        let single_valued = intent.kind == IntentKind::Ownership && chain.is_none();
         let winner_authoritative = paths
             .first()
             .is_some_and(|path| path.cost.is_authoritative());
@@ -725,7 +829,18 @@ impl QueryEngine {
             }
         }
 
-        let direct_answer = self.direct_answer(intent, &seeds, &paths, &bundle)?;
+        let direct_answer = match &chain {
+            Some(chain) => self.chain_answer(chain, &paths)?,
+            None => self.direct_answer(intent, &seeds, &paths, &bundle, &ambiguous)?,
+        };
+        for (name, count) in &ambiguous {
+            gaps.push(Gap {
+                kind: "ambiguous_entity".into(),
+                detail: format!(
+                    "{count} entities are called `{name}`; name the service or repository to narrow it down"
+                ),
+            });
+        }
         Ok(Retrieved {
             bundle,
             confidence,
@@ -736,6 +851,119 @@ impl QueryEngine {
         })
     }
 
+    /// Follows a relation chain from the question's entities, hop by hop. Each hop keeps the
+    /// most trustworthy nearest matches (or all of them, for hops such as "consumers"), and the
+    /// returned paths run from the starting entity to each final answer. Empty when any hop
+    /// leads nowhere.
+    fn follow(&self, chain: &relation::Chain, seeds: &[Seed], limits: Limits) -> Vec<Path> {
+        let best = seeds
+            .iter()
+            .map(|seed| seed.cost)
+            .fold(f32::INFINITY, f32::min);
+        let mut frontier: Vec<Path> = seeds
+            .iter()
+            .filter(|seed| seed.cost <= best)
+            .map(|seed| Path {
+                nodes: vec![seed.node],
+                steps: Vec::new(),
+                cost: PathCost::ZERO,
+            })
+            .collect();
+        let graph = self.deps.graph.read();
+        let finder = Pathfinder::new(&graph, &self.deps.graph_config);
+        for hop in &chain.hops {
+            let starts: Vec<Seed> = frontier
+                .iter()
+                .filter_map(Path::target)
+                .map(Seed::new)
+                .collect();
+            let mut goal = Goal::kinds(&hop.targets());
+            goal.exclude = starts.iter().map(|seed| seed.node).collect();
+            let found = finder.nearest(&starts, &goal, 50, &hop.profile(), limits);
+            let Some(first) = found.first() else {
+                return Vec::new();
+            };
+            let (top, fewest) = (
+                first.cost,
+                found.iter().map(|p| p.steps.len()).min().unwrap_or(0),
+            );
+            let mut next = Vec::new();
+            for path in found {
+                let keep = if hop.collects_all() {
+                    path.steps.len() == fewest
+                } else {
+                    path.cost.reference_elements == top.reference_elements
+                        && path.cost.weighted <= top.weighted + 1e-3
+                };
+                let prefix = path
+                    .nodes
+                    .first()
+                    .and_then(|start| frontier.iter().find(|p| p.target() == Some(*start)));
+                if let (true, Some(prefix)) = (keep, prefix) {
+                    let mut joined = prefix.clone();
+                    joined.nodes.extend(path.nodes.iter().skip(1));
+                    joined.steps.extend(path.steps.iter().copied());
+                    joined.cost += path.cost;
+                    next.push(joined);
+                }
+            }
+            frontier = next;
+        }
+        frontier.retain(|path| !path.steps.is_empty());
+        frontier
+    }
+
+    /// The answer to a relation-chain question: the entities reached, how trustworthy the path
+    /// is, and what it passed through.
+    fn chain_answer(&self, chain: &relation::Chain, paths: &[Path]) -> Result<Option<String>> {
+        let Some(first) = paths.first() else {
+            return Ok(None);
+        };
+        let Some(subject) = self.node_ref(first.nodes[0])? else {
+            return Ok(None);
+        };
+        let mut names = Vec::new();
+        for path in paths {
+            if let Some(node) = path
+                .target()
+                .map(|n| self.node_ref(n))
+                .transpose()?
+                .flatten()
+                && !names.contains(&node.name)
+            {
+                names.push(node.name);
+            }
+        }
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let basis = if paths.iter().all(|path| path.cost.is_authoritative()) {
+            "source of truth"
+        } else {
+            "partly from reference-only sources"
+        };
+        let mut via = Vec::new();
+        if first.nodes.len() > 2 {
+            for node in &first.nodes[1..first.nodes.len() - 1] {
+                if let Some(node) = self.node_ref(*node)? {
+                    via.push(node.name);
+                }
+            }
+        }
+        let mut answer = format!(
+            "{} of {}: {} [{}]",
+            chain.label(),
+            subject.name,
+            names.join(", "),
+            basis
+        );
+        if !via.is_empty() {
+            answer.push_str(&format!(" (via {})", via.join(" → ")));
+        }
+        answer.push('.');
+        Ok(Some(answer))
+    }
+
     /// Composes an answer from the graph alone, when the question allows it.
     fn direct_answer(
         &self,
@@ -743,6 +971,7 @@ impl QueryEngine {
         seeds: &[Seed],
         paths: &[Path],
         bundle: &ContextBundle,
+        ambiguous: &[(String, usize)],
     ) -> Result<Option<String>> {
         let subject = match seeds.first() {
             Some(seed) => self.node_ref(seed.node)?,
@@ -753,6 +982,37 @@ impl QueryEngine {
         };
         match intent.kind {
             IntentKind::Ownership => {
+                // Several entities share the name and nothing in the question says which one is
+                // meant: answer for each candidate instead of silently picking one.
+                if let Some((name, count)) = ambiguous.first()
+                    && seeds.iter().all(|seed| seed.cost > 0.0)
+                {
+                    let mut owners = Vec::new();
+                    for seed in seeds {
+                        let Some(path) = paths.iter().find(|path| {
+                            path.nodes.first() == Some(&seed.node) && !path.steps.is_empty()
+                        }) else {
+                            continue;
+                        };
+                        if let (Some(node), Some(owner)) = (
+                            self.node_ref(seed.node)?,
+                            path.target()
+                                .map(|n| self.node_ref(n))
+                                .transpose()?
+                                .flatten(),
+                        ) {
+                            owners.push(format!("{} is owned by {}", node.key, owner.name));
+                        }
+                    }
+                    if owners.is_empty() {
+                        return Ok(None);
+                    }
+                    return Ok(Some(format!(
+                        "`{name}` is ambiguous: {count} entities have that name. {}{}. Name the service or repository for a single answer.",
+                        owners.join("; "),
+                        if *count > owners.len() { "; ..." } else { "" }
+                    )));
+                }
                 let Some(path) = paths.iter().find(|path| !path.steps.is_empty()) else {
                     return Ok(None);
                 };
@@ -800,23 +1060,32 @@ impl QueryEngine {
                         let Some(other) = self.deps.store.node(edge.from)? else {
                             continue;
                         };
-                        let reason = edge
+                        let stated = edge
                             .claims
                             .iter()
                             .find_map(|claim| {
                                 claim.attrs.get(attrs::REASON).and_then(|v| v.as_str())
                             })
-                            .or_else(|| other.attrs.get(attrs::REASON).and_then(|v| v.as_str()))
-                            .or_else(|| {
-                                other
-                                    .attrs
-                                    .get(attrs::CLOSE_REASON)
-                                    .and_then(|v| v.as_str())
-                            })
-                            .map(str::to_owned);
+                            .or_else(|| other.attrs.get(attrs::REASON).and_then(|v| v.as_str()));
+                        let closed = other
+                            .attrs
+                            .get(attrs::CLOSE_REASON)
+                            .and_then(|v| v.as_str());
+                        // Something closed or dismissed explains itself by why it was closed;
+                        // what it originally said comes second.
+                        let reason = match (closed, stated) {
+                            (Some(closed), Some(stated)) => Some(format!(
+                                "{}{closed} (it had said: {stated})",
+                                closed_by(&other)
+                            )),
+                            (Some(closed), None) => Some(format!("{}{closed}", closed_by(&other))),
+                            (None, stated) => stated.map(str::to_owned),
+                        };
                         let state = other
                             .attrs
-                            .get(attrs::DECISION)
+                            .get(attrs::THREAD_STATUS)
+                            .filter(|v| v.as_str() == Some(attrs::THREAD_DISMISSED))
+                            .or_else(|| other.attrs.get(attrs::DECISION))
                             .or_else(|| other.attrs.get(attrs::THREAD_STATUS))
                             .or_else(|| other.attrs.get(attrs::STATUS))
                             .and_then(|v| v.as_str())
@@ -846,11 +1115,23 @@ impl QueryEngine {
                     let Some(node) = self.deps.store.node(NodeId(subject.id))? else {
                         return Ok(None);
                     };
-                    let state = [attrs::STATUS, attrs::DECISION, attrs::THREAD_STATUS]
+                    let state = [attrs::THREAD_STATUS, attrs::STATUS, attrs::DECISION]
                         .iter()
                         .find_map(|name| node.attrs.get(*name).and_then(|v| v.as_str()));
-                    return Ok(state
-                        .map(|state| format!("{} ({}) is {state}.", subject.name, subject.kind)));
+                    let reason = node
+                        .attrs
+                        .get(attrs::CLOSE_REASON)
+                        .or_else(|| node.attrs.get(attrs::REASON))
+                        .and_then(|v| v.as_str());
+                    return Ok(state.map(|state| match reason {
+                        Some(reason) => format!(
+                            "{} ({}) is {state}: {}{reason}",
+                            subject.name,
+                            subject.kind,
+                            closed_by(&node)
+                        ),
+                        None => format!("{} ({}) is {state}.", subject.name, subject.kind),
+                    }));
                 }
                 Ok(Some(format!("{} is {}.", subject.name, reasons.join("; "))))
             }

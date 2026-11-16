@@ -16,6 +16,7 @@ mod ollama;
 mod openai;
 mod policy;
 mod provider;
+pub mod relation;
 mod scripted;
 mod tiered;
 

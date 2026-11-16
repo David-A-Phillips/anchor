@@ -179,8 +179,8 @@ const THRESHOLDS: Thresholds = Thresholds {
     ownership_accuracy: 0.90,
     justification_recall: 0.30,
     justification_precision: 0.03,
-    relationship_recall: 0.25,
-    relationship_accuracy: 0.30,
+    relationship_recall: 0.90,
+    relationship_accuracy: 0.90,
 };
 
 fn declared_paths_exist(world: &World, q: &RelationshipQuestion) -> bool {
@@ -347,9 +347,9 @@ fn recall_precision_and_accuracy_on_the_synthetic_enterprise() {
         relationships.recall() >= t.relationship_recall,
         "relationship recall"
     );
-    // Relationship questions are classified as general: the engine returns evidence-role items
-    // only, so answer-role precision is undefined (0/0) and not asserted.
-    assert_eq!(relationships.answers, 0, "relationship answers appeared");
+    // Relationship questions are read as relation chains and followed hop by hop, so they
+    // produce answer-role items.
+    assert!(relationships.answers > 0, "no relationship answers");
     // Categories the engine handles well must stay well handled.
     for kind in ["api", "service", "endpoint", "file"] {
         assert!(by_kind[kind].recall() >= 0.95, "ownership.{kind} recall");

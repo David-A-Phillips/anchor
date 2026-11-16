@@ -628,6 +628,16 @@ impl<'a> Builder<'a> {
                     }
                     self.unit.add_edge(edge);
                 }
+                // Why a dismissed review was dismissed is the decision people ask about; it
+                // comes before the review's own text.
+                if dismissed && let Some(message) = text(review, "dismissal_message") {
+                    let by = login(review, "dismissed_by").unwrap_or("unknown");
+                    self.unit.add_chunk(
+                        &key,
+                        ChunkKind::Decision,
+                        format!("Dismissed by {by}: {message}"),
+                    );
+                }
                 self.unit.add_chunk(&key, ChunkKind::Decision, body);
                 for edge in mentions::mention_edges(&key, body) {
                     self.unit.add_edge(edge);

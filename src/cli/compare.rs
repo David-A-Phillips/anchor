@@ -73,6 +73,31 @@ pub struct SystemResult {
     pub latency_ms: f64,
 }
 
+/// Resource use of one system, written next to its results as `<system>.meta.json`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Footprint {
+    /// Size of the persisted index on disk, in bytes.
+    #[serde(default)]
+    pub index_bytes: Option<u64>,
+    /// Peak resident memory of the process that indexed and answered, in bytes.
+    #[serde(default)]
+    pub peak_rss_bytes: Option<u64>,
+    /// Seconds spent building the index.
+    #[serde(default)]
+    pub index_seconds: Option<f64>,
+    /// What the numbers leave out (e.g. a separate embedding server).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Peak resident set size of this process, from `/proc/self/status` (Linux).
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
 /// Lower-cases and reduces every run of non-alphanumeric characters to one space, padded with
 /// spaces so that containment checks respect word boundaries.
 pub fn normalize(text: &str) -> String {
@@ -430,8 +455,13 @@ fn stale_safe(question: &Question, text: &str, need_correct: bool) -> bool {
     }
 }
 
-/// Scores one system's results per category (plus `all`).
-pub fn score(questions: &[Question], results: &[SystemResult]) -> BTreeMap<String, Score> {
+/// Scores one system's results per category (plus `all`); with `kinds`, also per
+/// `category/kind`.
+pub fn score(
+    questions: &[Question],
+    results: &[SystemResult],
+    kinds: bool,
+) -> BTreeMap<String, Score> {
     let by_id: HashMap<&str, &SystemResult> = results.iter().map(|r| (r.id.as_str(), r)).collect();
     let any_answer = results.iter().any(|r| r.answer.is_some());
     let empty = SystemResult::default();
@@ -442,9 +472,13 @@ pub fn score(questions: &[Question], results: &[SystemResult]) -> BTreeMap<Strin
         let recall = share(question, &context, false);
         let answer = result.answer.as_deref().map(normalize).unwrap_or_default();
         let generated = result.generated_answer.as_deref().map(normalize);
-        for name in [question.category.as_str(), "all"] {
+        let mut names = vec![question.category.clone(), "all".to_owned()];
+        if kinds {
+            names.push(format!("{}/{}", question.category, question.kind));
+        }
+        for name in names {
             let (score, answer_sum, generated_sum, stale_context, stale_generated) =
-                sums.entry(name.to_owned()).or_default();
+                sums.entry(name).or_default();
             score.questions += 1;
             score.context_recall += recall;
             score.context_complete += f64::from(recall >= 1.0);
@@ -513,6 +547,7 @@ pub async fn export(
     queries: &QueryEngine,
     truth: &GroundTruth,
     dir: &Path,
+    index_seconds: Option<f64>,
 ) -> Result<()> {
     let results_dir = dir.join("results");
     std::fs::create_dir_all(&results_dir)?;
@@ -525,6 +560,23 @@ pub async fn export(
             run_baseline(engine, baseline, &questions).await?,
         ));
     }
+    engine.store().db().checkpoint()?;
+    let mut footprint = Footprint {
+        index_bytes: Some(engine.store().db().size_on_disk()?),
+        peak_rss_bytes: peak_rss_bytes(),
+        index_seconds: None,
+        note: Some("embeddings computed in-process; no model server".into()),
+    };
+    let meta = results_dir.join("anchor.meta.json");
+    if let Ok(previous) = std::fs::read_to_string(&meta)
+        && let Ok(previous) = serde_json::from_str::<Footprint>(&previous)
+    {
+        footprint.index_seconds = previous.index_seconds;
+    }
+    if let Some(seconds) = index_seconds {
+        footprint.index_seconds = Some(seconds);
+    }
+    std::fs::write(&meta, serde_json::to_string_pretty(&footprint)?)?;
     for (name, mut results) in systems {
         let path = results_dir.join(format!("{name}.jsonl"));
         if path.exists() {
@@ -545,7 +597,7 @@ pub async fn export(
 }
 
 /// Scores every `results/*.jsonl` in `dir` against `questions.jsonl`. Anchor comes first.
-pub fn score_dir(dir: &Path) -> Result<Vec<(String, BTreeMap<String, Score>)>> {
+pub fn score_dir(dir: &Path, kinds: bool) -> Result<Vec<(String, BTreeMap<String, Score>)>> {
     let questions: Vec<Question> = read_jsonl(&dir.join("questions.jsonl"))?;
     let mut files: Vec<_> = std::fs::read_dir(dir.join("results"))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -567,9 +619,58 @@ pub fn score_dir(dir: &Path) -> Result<Vec<(String, BTreeMap<String, Score>)>> {
             .to_string_lossy()
             .into_owned();
         let results: Vec<SystemResult> = read_jsonl(&path)?;
-        out.push((name, score(&questions, &results)));
+        out.push((name, score(&questions, &results, kinds)));
     }
     Ok(out)
+}
+
+/// Reads the footprint of every system that recorded one. The plain-retrieval baselines run
+/// inside Anchor on Anchor's index and have none of their own.
+pub fn footprints(dir: &Path) -> Result<Vec<(String, Footprint)>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir.join("results"))? {
+        let path = entry?.path();
+        let Some(name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".meta.json"))
+        else {
+            continue;
+        };
+        out.push((
+            name.to_owned(),
+            serde_json::from_str(&std::fs::read_to_string(&path)?)?,
+        ));
+    }
+    out.sort_by_key(|(name, _)| (name != "anchor", name.clone()));
+    Ok(out)
+}
+
+/// Renders the footprint table.
+pub fn render_footprints(rows: &[(String, Footprint)]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mb = |bytes: Option<u64>| {
+        bytes.map_or_else(|| "-".to_owned(), |b| format!("{:.1}", b as f64 / 1e6))
+    };
+    let mut out = format!(
+        "\nfootprint\n{:<22} {:>10} {:>12} {:>9}  {}\n",
+        "system", "index MB", "peak RSS MB", "index s", "note"
+    );
+    for (name, footprint) in rows {
+        out.push_str(&format!(
+            "{:<22} {:>10} {:>12} {:>9}  {}\n",
+            name,
+            mb(footprint.index_bytes),
+            mb(footprint.peak_rss_bytes),
+            footprint
+                .index_seconds
+                .map_or_else(|| "-".to_owned(), |s| format!("{s:.1}")),
+            footprint.note.as_deref().unwrap_or("")
+        ));
+    }
+    out
 }
 
 fn cell(value: Option<f64>) -> String {
@@ -579,15 +680,35 @@ fn cell(value: Option<f64>) -> String {
 /// Renders the scoreboard, one table per category.
 pub fn render(board: &[(String, BTreeMap<String, Score>)]) -> String {
     let mut out = String::new();
-    for category in ["ownership", "justification", "relationships", "all"] {
-        let Some(n) = board
-            .iter()
-            .find_map(|(_, scores)| scores.get(category).map(|s| s.questions))
-        else {
+    let mut categories: Vec<&str> = board
+        .iter()
+        .flat_map(|(_, scores)| scores.keys().map(String::as_str))
+        .filter(|name| *name != "all")
+        .collect();
+    categories.sort_unstable();
+    categories.dedup();
+    categories.push("all");
+    for category in categories {
+        let Some((n, sampled)) = board.iter().find_map(|(_, scores)| {
+            scores.get(category).map(|s| {
+                let sampled = board
+                    .iter()
+                    .filter_map(|(_, scores)| scores.get(category))
+                    .map(|s| s.generated_questions)
+                    .max()
+                    .unwrap_or(0);
+                (s.questions, sampled)
+            })
+        }) else {
             continue;
         };
+        let sample = if sampled > 0 {
+            format!("; gen-ans on a sample of {sampled}")
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "\n{category} ({n} questions)\n{:<22} {:>8} {:>9} {:>8} {:>10} {:>8} {:>9}\n",
+            "\n{category} ({n} questions{sample})\n{:<22} {:>8} {:>9} {:>8} {:>10} {:>8} {:>9}\n",
             "system", "ctx-rec", "ctx-full", "own-ans", "gen-ans", "tokens", "ms/query"
         ));
         for (name, scores) in board {
@@ -679,7 +800,11 @@ mod tests {
     #[test]
     fn recall_counts_groups_not_forms() {
         let q = question(&[&["alice", "Alice Smith"], &["bob"]], &[], false);
-        let scores = score(&[q], &[result(&["alice smith, also known as alice"], None)]);
+        let scores = score(
+            &[q],
+            &[result(&["alice smith, also known as alice"], None)],
+            false,
+        );
         assert!((scores["all"].context_recall - 0.5).abs() < 1e-9);
         assert!(scores["all"].context_complete.abs() < 1e-9);
         assert_eq!(scores["all"].generated_recall, None);
@@ -696,8 +821,8 @@ mod tests {
             &["legacy team owns it", "core team owns it"],
             Some("Legacy team."),
         );
-        let good = score(std::slice::from_ref(&q), &[lead_correct]);
-        let bad = score(&[q], &[lead_stale]);
+        let good = score(std::slice::from_ref(&q), &[lead_correct], false);
+        let bad = score(&[q], &[lead_stale], false);
         assert!((good["all"].stale_context_safe - 1.0).abs() < 1e-9);
         assert_eq!(good["all"].stale_generated_safe, Some(1.0));
         assert!(bad["all"].stale_context_safe.abs() < 1e-9);
@@ -712,7 +837,7 @@ mod tests {
             true,
         );
         let paraphrase = "It was dismissed as out of scope for the runbook and is tracked in a separate design note.";
-        let scores = score(&[q], &[result(&[paraphrase], Some(paraphrase))]);
+        let scores = score(&[q], &[result(&[paraphrase], Some(paraphrase))], false);
         assert!(scores["all"].context_recall.abs() < 1e-9);
         assert_eq!(scores["all"].generated_recall, Some(1.0));
     }
@@ -721,7 +846,7 @@ mod tests {
     fn contexts_are_cut_to_the_shared_budget() {
         let q = question(&[&["needle"]], &[], false);
         let filler = "hay ".repeat(CONTEXT_TOKENS);
-        let scores = score(&[q], &[result(&[&filler, &filler, "needle"], None)]);
+        let scores = score(&[q], &[result(&[&filler, &filler, "needle"], None)], false);
         assert!(scores["all"].context_recall.abs() < 1e-9);
         assert!(scores["all"].context_tokens <= CONTEXT_TOKENS as f64 * 1.01);
     }

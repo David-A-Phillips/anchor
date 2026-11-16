@@ -81,6 +81,9 @@ async def main():
         if len(rows) % 50 == 0:
             print(f"answered {len(rows)} questions", flush=True)
     common.write_results(args.run, "lightrag-mix", rows)
+    common.write_footprint(
+        args.run, ["lightrag-mix"], args.workdir, time.perf_counter() - started,
+        "index s includes this run only; LLM and embedding model run in Ollama (not counted: 5.2 GB on disk)")
     await rag.finalize_storages()
 
 

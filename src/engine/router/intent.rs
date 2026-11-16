@@ -382,6 +382,22 @@ const NOT_A_NAME: &[&str] = &[
     "find",
     "tell",
     "give",
+    "containing",
+    "contains",
+    "contain",
+    "owning",
+    "leads",
+    "lead",
+    "leading",
+    "consume",
+    "consumes",
+    "consuming",
+    "implements",
+    "implementing",
+    "belong",
+    "belongs",
+    "behind",
+    "code",
 ];
 
 static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
@@ -403,6 +419,12 @@ static BEFORE_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
         .expect("static regex is valid")
 });
 
+/// A capitalised multi-word name before a keyword: "the Invoice Engine component".
+static TITLE_BEFORE_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b((?:[A-Z][\w.\-]*\s+){2,5})(API|api|service|team|component|domain|portfolio)\b")
+        .expect("static regex is valid")
+});
+
 fn keyword_kind(keyword: &str) -> NodeKind {
     match keyword.to_ascii_lowercase().as_str() {
         "api" => NodeKind::ApiSpec,
@@ -410,6 +432,7 @@ fn keyword_kind(keyword: &str) -> NodeKind {
         "team" => NodeKind::Team,
         "ticket" => NodeKind::Ticket,
         "component" => NodeKind::Component,
+        "portfolio" => NodeKind::Portfolio,
         _ => NodeKind::Domain,
     }
 }
@@ -472,6 +495,24 @@ fn extract_entities(query: &str) -> Vec<EntityMention> {
         let text = clean_name(name.as_str());
         if !NOT_A_NAME.contains(&text.to_ascii_lowercase().as_str()) {
             add(name.start(), text, Some(keyword_kind(keyword.as_str())));
+        }
+    }
+    for caps in TITLE_BEFORE_KEYWORD.captures_iter(query) {
+        let (Some(name), Some(keyword)) = (caps.get(1), caps.get(2)) else {
+            continue;
+        };
+        // Drop a leading question or filler word that merely starts the sentence.
+        let mut words: Vec<&str> = name.as_str().split_whitespace().collect();
+        while words
+            .first()
+            .is_some_and(|word| NOT_A_NAME.contains(&word.to_ascii_lowercase().as_str()))
+        {
+            words.remove(0);
+        }
+        if words.len() >= 2 {
+            let text = words.join(" ");
+            let pos = name.start() + name.as_str().find(words[0]).unwrap_or(0);
+            add(pos, &text, Some(keyword_kind(keyword.as_str())));
         }
     }
     for caps in BEFORE_KEYWORD.captures_iter(query) {
@@ -556,11 +597,19 @@ impl HeuristicClassifier {
     /// Confidence is 0.8 when a rule matched and 0.3 for the `General` catch-all.
     pub fn classify(&self, query: &str) -> QueryIntent {
         let lower = query.trim().to_lowercase();
-        let kind = intent_kind(&lower);
         let entities = extract_entities(query);
+        // A question that spells out a path through the graph ("who leads the team that owns
+        // ...") is answered by following it; its last hop says what kind of node answers.
+        let chain = super::relation::parse(query);
+        let kind = chain
+            .as_ref()
+            .map_or_else(|| intent_kind(&lower), super::relation::Chain::intent);
         QueryIntent {
             kind,
-            target_kinds: default_target_kinds(kind),
+            target_kinds: chain.as_ref().map_or_else(
+                || default_target_kinds(kind),
+                super::relation::Chain::targets,
+            ),
             complexity: complexity(&lower, kind, entities.len()),
             confidence: if kind == IntentKind::General {
                 0.3

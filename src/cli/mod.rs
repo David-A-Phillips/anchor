@@ -122,6 +122,12 @@ enum Command {
         /// only the results already in the directory are scored.
         #[arg(long)]
         truth: Option<PathBuf>,
+        /// Also break the scores down by question kind.
+        #[arg(long)]
+        kinds: bool,
+        /// With --truth: ingest every source first and record how long indexing takes.
+        #[arg(long, requires = "truth")]
+        reindex: bool,
         /// Print the scores as JSON.
         #[arg(long)]
         json: bool,
@@ -867,20 +873,44 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
             engine.flush()?;
         }
-        Command::Compare { dir, truth, json } => {
+        Command::Compare {
+            dir,
+            truth,
+            kinds,
+            reindex,
+            json,
+        } => {
             if let Some(truth) = truth {
                 let (config, _) = load_config(&cli.config)?;
                 let truth: crate::synth::GroundTruth =
                     serde_json::from_str(&std::fs::read_to_string(&truth)?)?;
                 let engine = open_engine(config).await?;
-                compare::export(&engine, &query_engine(&engine), &truth, &dir).await?;
+                // With --reindex the sources are ingested from scratch first, so that indexing
+                // time is measured too (start from an empty data directory).
+                let mut index_seconds = None;
+                if reindex {
+                    let started = std::time::Instant::now();
+                    let scan = engine.clone();
+                    tokio::task::spawn_blocking(move || scan.scan_all()).await??;
+                    engine.embed_pending().await?;
+                    index_seconds = Some(started.elapsed().as_secs_f64());
+                }
+                compare::export(&engine, &query_engine(&engine), &truth, &dir, index_seconds)
+                    .await?;
                 engine.flush()?;
             }
-            let board = compare::score_dir(&dir)?;
+            let board = compare::score_dir(&dir, kinds)?;
+            let footprints = compare::footprints(&dir)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&board)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "scores": board, "footprint": footprints })
+                    )?
+                );
             } else {
                 print!("{}", compare::render(&board));
+                print!("{}", compare::render_footprints(&footprints));
             }
         }
         Command::Enrich { limit } => {

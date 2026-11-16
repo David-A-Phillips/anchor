@@ -26,6 +26,7 @@ def arguments(description):
     parser.add_argument("--ollama", default="http://127.0.0.1:11434", help="Ollama base URL")
     parser.add_argument("--embedding-model", default="nomic-embed-text")
     parser.add_argument("--limit", type=int, default=0, help="only the first N questions (smoke test)")
+    parser.add_argument("--index-dir", type=pathlib.Path, help="where to persist the index (measured for the footprint)")
     return parser
 
 
@@ -37,6 +38,12 @@ def questions(run, limit=0):
 def write_results(run, system, rows):
     path = run / "results" / f"{system}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():  # keep answers already generated for unchanged contexts
+        old = {r["id"]: r for r in map(json.loads, path.read_text().splitlines()) if r}
+        for row in rows:
+            previous = old.get(row["id"])
+            if previous and previous.get("contexts") == row["contexts"]:
+                row["generated_answer"] = previous.get("generated_answer")
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     print(f"wrote {len(rows)} results to {path}")
 
@@ -69,3 +76,21 @@ def budgeted(contexts):
         kept.append(context)
         size += len(context) + 2
     return kept
+
+
+def directory_bytes(path):
+    return sum(p.stat().st_size for p in pathlib.Path(path).rglob("*") if p.is_file())
+
+
+def write_footprint(run, systems, index_dir, index_seconds, note):
+    """Records index size on disk, this process's peak memory and indexing time."""
+    import resource
+    meta = {
+        "index_bytes": directory_bytes(index_dir),
+        "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+        "index_seconds": index_seconds,
+        "note": note,
+    }
+    for system in systems:
+        (run / "results" / f"{system}.meta.json").write_text(json.dumps(meta, indent=1))
+    print(f"footprint: index {meta['index_bytes'] / 1e6:.1f} MB, peak RSS {meta['peak_rss_bytes'] / 1e6:.0f} MB")
