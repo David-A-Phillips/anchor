@@ -25,7 +25,7 @@ sleep 1
 brew tap-new --no-git "$tap"
 formula="$(brew --repository "$tap")/Formula/anchor.rb"
 # The license placeholder is not a valid SPDX id; use MIT in this throwaway copy only.
-sed "s/TODO(owner)/MIT/" "$root/packaging/homebrew/anchor.rb" >"$formula"
+cp "$root/packaging/homebrew/anchor.rb" "$formula"
 ANCHOR_BASE_URL="http://127.0.0.1:${port}" "$root/packaging/homebrew/update-formula.sh" "$version" "$dir" "$formula"
 
 echo "=== audit"

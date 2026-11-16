@@ -44,12 +44,13 @@ that all C dependencies build.
 Each release rebuilds the repositories from scratch: the apt and dnf repositories contain **only the
 latest version**.
 
-## Placeholders to fill (once)
+## Repository and licence
 
-| What | Where |
-|------|-------|
-| GitHub owner (`OWNER`) | `Cargo.toml` (`repository`, `homepage`, binstall/deb/rpm `url`), `packaging/**`, `docs/install.md`, `scripts/install.sh` default. Search for `OWNER` |
-| License | `Cargo.toml` (`license`, `[package.metadata.deb] copyright`, `license-file`, `[package.metadata.generate-rpm] license`), `packaging/LICENSE.TODO` (replace by the real `LICENSE` at the repository root and point `license-file` at it), the Homebrew formulas, `packaging/aur/PKGBUILD`, `packaging/scoop/anchor.json`, `packaging/winget/OWNER.Anchor.yaml`, `packaging/nix/flake.nix`. Search for `TODO(owner)` |
+The repository is `David-A-Phillips/anchor` and the licence is MIT (`LICENSE`). If the project
+moves, search for `David-A-Phillips` in `Cargo.toml`, `packaging/`, `docs/install.md` and
+`scripts/install.sh`. The repository is private for now: the install script, Homebrew formula and
+package repositories download release assets anonymously, so they only work once the repository
+(or at least its releases and Pages site) is public.
 
 ## Secrets and variables
 
@@ -126,7 +127,7 @@ run `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`, test in a clean chroot
 **Scoop:** put `packaging/scoop/anchor.json` in your own bucket repository (`scoop bucket add`),
 or submit to `ScoopInstaller/Extras` once notable. **winget:** `wingetcreate new <zip url>` (or
 update with `wingetcreate update`) generates the manifest in `microsoft/winget-pkgs`;
-`packaging/winget/OWNER.Anchor.yaml` is the starting point. Windows binaries are not code-signed,
+`packaging/winget/David-A-Phillips.Anchor.yaml` is the starting point. Windows binaries are not code-signed,
 so SmartScreen may warn.
 
 ## Local equivalents

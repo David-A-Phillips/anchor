@@ -8,7 +8,7 @@
 #   formula  defaults to packaging/homebrew/anchor.rb next to this script
 #
 # Environment:
-#   ANCHOR_REPO      GitHub owner/name for the download URLs (default OWNER/anchor)
+#   ANCHOR_REPO      GitHub owner/name for the download URLs (default David-A-Phillips/anchor)
 #   ANCHOR_BASE_URL  directory URL holding the archives, overriding the GitHub release URL
 #                    (used for local testing)
 set -euo pipefail
@@ -20,7 +20,7 @@ fi
 version=$1
 dir=$2
 formula=${3:-"$(dirname "$0")/anchor.rb"}
-repo=${ANCHOR_REPO:-OWNER/anchor}
+repo=${ANCHOR_REPO:-David-A-Phillips/anchor}
 base=${ANCHOR_BASE_URL:-"https://github.com/${repo}/releases/download/v${version}"}
 
 targets="aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"

@@ -8,3 +8,32 @@
 .DS_Store
 .claude/worktrees/
 __pycache__/
+
+# --- secrets and local state: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.gpg
+*.asc
+id_rsa*
+id_ed25519*
+secrets/
+keys/
+trusted_devices.json
+.atlassian-state.json
+*.bundle
+# local configuration and tool state
+/anchor.toml
+anchor.local.toml
+.claude/
+.cursor/
+.vscode/
+.idea/
+# Python used by scripts/compare
+venv/
+.venv/
+*.pyc

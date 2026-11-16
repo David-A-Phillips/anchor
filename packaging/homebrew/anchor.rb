@@ -1,34 +1,33 @@
-# Homebrew formula for a tap (OWNER/homebrew-tap, file Formula/anchor.rb). Installs the prebuilt
+# Homebrew formula for a tap (David-A-Phillips/homebrew-tap, file Formula/anchor.rb). Installs the prebuilt
 # release archives; see anchor-source.rb for a build-from-source variant.
 #
 # The version and the four checksums are rewritten from a release's `.sha256` files by
 # packaging/homebrew/update-formula.sh (the release workflow runs it). The all-zero checksums
 # below are placeholders until that has run for a real release.
 #
-#   brew tap OWNER/tap
+#   brew tap David-A-Phillips/tap
 #   brew install anchor
 class Anchor < Formula
   desc "Local-first context engine that grounds AI models in your codebases"
-  homepage "https://github.com/OWNER/anchor"
-  # TODO(owner): the real SPDX license identifier (brew audit requires one).
-  license "TODO(owner)"
+  homepage "https://github.com/David-A-Phillips/anchor"
+  license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/OWNER/anchor/releases/download/v0.1.0/anchor-0.1.0-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/David-A-Phillips/anchor/releases/download/v0.1.0/anchor-0.1.0-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/OWNER/anchor/releases/download/v0.1.0/anchor-0.1.0-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/David-A-Phillips/anchor/releases/download/v0.1.0/anchor-0.1.0-x86_64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/OWNER/anchor/releases/download/v0.1.0/anchor-0.1.0-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/David-A-Phillips/anchor/releases/download/v0.1.0/anchor-0.1.0-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/OWNER/anchor/releases/download/v0.1.0/anchor-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/David-A-Phillips/anchor/releases/download/v0.1.0/anchor-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end

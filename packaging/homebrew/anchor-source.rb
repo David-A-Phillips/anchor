@@ -4,12 +4,11 @@
 # under a different name, or instead of anchor.rb; both define class Anchor.
 class Anchor < Formula
   desc "Local-first context engine that grounds AI models in your codebases"
-  homepage "https://github.com/OWNER/anchor"
-  url "https://github.com/OWNER/anchor/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/David-A-Phillips/anchor"
+  url "https://github.com/David-A-Phillips/anchor/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  # TODO(owner): the real SPDX license identifier (homebrew-core requires an OSI-approved one).
-  license "TODO(owner)"
-  head "https://github.com/OWNER/anchor.git", branch: "main"
+  license "MIT"
+  head "https://github.com/David-A-Phillips/anchor.git", branch: "main"
 
   depends_on "rust" => :build
 

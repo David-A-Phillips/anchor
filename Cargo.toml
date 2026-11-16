@@ -5,11 +5,9 @@ edition = "2024"
 rust-version = "1.88"
 description = "Local-first context engine and synchronization daemon that grounds AI models in multi-repository codebases, enterprise domains, wikis, API approval portals and trackers."
 readme = "README.md"
-# TODO(owner): set the real SPDX license identifier (and add a LICENSE file); the packages need it.
-license = "TODO(owner)"
-# TODO(owner): replace OWNER with the real GitHub account or organisation.
-repository = "https://github.com/OWNER/anchor"
-homepage = "https://github.com/OWNER/anchor"
+license = "MIT"
+repository = "https://github.com/David-A-Phillips/anchor"
+homepage = "https://github.com/David-A-Phillips/anchor"
 authors = ["David <phillipsadavid@gmail.com>"]
 keywords = ["context", "mcp", "code-search", "knowledge-graph", "daemon"]
 categories = ["command-line-utilities", "development-tools"]
@@ -240,8 +238,8 @@ harness = false
 [package.metadata.deb]
 name = "anchor-context"
 maintainer = "David <phillipsadavid@gmail.com>"
-copyright = "Copyright (C) 2026 TODO(owner)"
-license-file = ["packaging/LICENSE.TODO", "0"]
+copyright = "Copyright (C) 2026 David Phillips"
+license-file = ["LICENSE", "0"]
 section = "devel"
 priority = "optional"
 depends = "$auto, adduser"
@@ -278,9 +276,8 @@ assets = [
 [package.metadata.generate-rpm]
 name = "anchor-context"
 summary = "Local-first context engine and sync daemon for AI models"
-# TODO(owner): must match the license chosen above.
-license = "TODO(owner)"
-url = "https://github.com/OWNER/anchor"
+license = "MIT"
+url = "https://github.com/David-A-Phillips/anchor"
 # Account creation on install and cleanup on final uninstall (neither starts a service).
 pre_install_script = '''
 # Creates the unprivileged `anchor` account used by anchor-server.service. Does not start anything.

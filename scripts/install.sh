@@ -2,17 +2,17 @@
 # Anchor installer: downloads a prebuilt release archive, verifies its SHA-256 and installs
 # the `anchor` binary.
 #
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/anchor/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/David-A-Phillips/anchor/main/scripts/install.sh | sh
 #
 # Environment:
-#   ANCHOR_REPO         GitHub "owner/name" (default: OWNER/anchor, a PLACEHOLDER: set it)
+#   ANCHOR_REPO         GitHub "owner/name" (default: David-A-Phillips/anchor, a PLACEHOLDER: set it)
 #   ANCHOR_VERSION      version without the leading "v" (default: latest release)
 #   ANCHOR_INSTALL_DIR  install directory (default: $HOME/.local/bin)
 #   ANCHOR_BASE_URL     directory URL holding the archive and its .sha256 file (a mirror or a
 #                       local test server); requires ANCHOR_VERSION
 set -eu
 
-ANCHOR_REPO="${ANCHOR_REPO:-OWNER/anchor}"
+ANCHOR_REPO="${ANCHOR_REPO:-David-A-Phillips/anchor}"
 INSTALL_DIR="${ANCHOR_INSTALL_DIR:-$HOME/.local/bin}"
 
 say() { printf '%s\n' "$*"; }
@@ -29,7 +29,7 @@ else
 fi
 
 case "$ANCHOR_REPO" in
-  OWNER/*) if [ -z "${ANCHOR_BASE_URL:-}" ]; then
+  David-A-Phillips/*) if [ -z "${ANCHOR_BASE_URL:-}" ]; then
     die "ANCHOR_REPO is still the placeholder '$ANCHOR_REPO'; set ANCHOR_REPO=owner/name (or ANCHOR_BASE_URL)"
   fi ;;
 esac

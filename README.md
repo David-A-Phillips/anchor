@@ -37,8 +37,8 @@ question types; see [docs/benchmarks.md](docs/benchmarks.md) for method, data an
 ```sh
 sudo apt-get install anchor-context      # Debian, Ubuntu (after adding the apt repository)
 sudo dnf install anchor-context          # Fedora, RHEL family (after adding the repository)
-brew install OWNER/tap/anchor            # macOS, Linux
-curl -fsSL https://raw.githubusercontent.com/OWNER/anchor/main/scripts/install.sh | sh
+brew install David-A-Phillips/tap/anchor            # macOS, Linux
+curl -fsSL https://raw.githubusercontent.com/David-A-Phillips/anchor/main/scripts/install.sh | sh
 cargo build --release                    # from source: Rust 1.88+ and a C compiler
 ```
 
@@ -46,10 +46,11 @@ The package is called `anchor-context` (other distributions' `anchor` packages a
 the command is `anchor`. [docs/install.md](docs/install.md) has the repository setup for apt and
 dnf, upgrade and removal, running as a systemd or Homebrew service, Docker, and Windows.
 
-No release has been published yet, so the package commands above do not work until one is:
-`OWNER` is a placeholder for the repository, and [RELEASING.md](RELEASING.md) lists what a
-release needs. The `.deb`, `.rpm` and Homebrew formula have been built and installed in local
-containers on Linux x86_64; macOS, Windows and arm64 have not been built.
+No release has been published yet, and the repository is private, so the package commands above
+do not work until a release exists and its assets are publicly downloadable;
+[RELEASING.md](RELEASING.md) lists what a release needs. The `.deb`, `.rpm` and Homebrew formula
+have been built and installed in local containers on Linux x86_64; macOS, Windows and arm64 have
+not been built.
 
 ## Run it locally
 
@@ -130,7 +131,7 @@ max_commits = 2000            # most recent commits per repository; older ones a
 max_files_per_commit = 30     # larger commits keep the count, not the file links
 ```
 
-For the trail to reach reviews and tickets, ingest them too: `anchor fetch OWNER/REPO` for GitHub
+For the trail to reach reviews and tickets, ingest them too: `anchor fetch David-A-Phillips/REPO` for GitHub
 pull requests, a `jira` source or `anchor fetch-atlassian` for tickets and wiki pages.
 
 ## Connect your data sources
@@ -142,7 +143,7 @@ fetch command, which the daemon can repeat on a schedule.
 | System | How it gets in | Source kind | Default trust |
 |---|---|---|---|
 | Local repositories | Read in place and watched for changes. Code in Rust, Python, JavaScript, TypeScript, Go, Java and C; docs; `CODEOWNERS`; OpenAPI files; recent git history | `repo` | source of truth |
-| GitHub issues, discussions and pull-request reviews | `anchor fetch OWNER/REPO` (uses your `gh` login), or a `[[github]]` entry the daemon refreshes | `issues`, `code_review` | reference only |
+| GitHub issues, discussions and pull-request reviews | `anchor fetch David-A-Phillips/REPO` (uses your `gh` login), or a `[[github]]` entry the daemon refreshes | `issues`, `code_review` | reference only |
 | Confluence | `anchor fetch-atlassian`, or an `[[atlassian]]` entry; Cloud and Data Center | `wiki` | reference only |
 | Jira | `anchor fetch-atlassian`, or issue JSON you export yourself | `jira` | reference only |
 | Other wikis | A directory of Markdown or HTML pages, with comment threads in sidecar files | `wiki` | reference only |
@@ -291,7 +292,7 @@ current limits (no per-user access control) are in [docs/hosting.md](docs/hostin
 | `anchor fetch-atlassian [URL]` | Export Confluence spaces and Jira projects (incremental; see `docs/atlassian.md`) |
 | `anchor eval --truth FILE` | Score the engine against questions with known answers |
 | `anchor compare DIR [--truth FILE] [--reindex] [--kinds]` | Score Anchor next to plain retrieval and other RAG systems: quality, latency, disk and memory |
-| `anchor fetch OWNER/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
+| `anchor fetch David-A-Phillips/REPO [--issues N] [--discussions N] [--pulls N] [--out DIR]` | Export a GitHub repo's issues, discussions and PR reviews |
 | `anchor deepen SOURCE [--depth map\|full]` | Ingest a source more deeply |
 | `anchor export [-o FILE]` / `anchor import FILE` | Write or merge a signed `.contextpack` |
 | `anchor server` / `anchor sync` | Run the central sync server / sync once against it |
@@ -311,3 +312,7 @@ current limits (no per-user access control) are in [docs/hosting.md](docs/hostin
 | [docs/benchmarks.md](docs/benchmarks.md) | Comparison with LlamaIndex, LangChain and LightRAG: results, method, dataset, caveats |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Design: units, trust-weighted paths, sync, storage |
 | [docs/development.md](docs/development.md) | Building, tests, performance budgets, known limitations |
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

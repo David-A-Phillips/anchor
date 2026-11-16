@@ -1,8 +1,8 @@
 # Installing and sharing Anchor
 
 Pick the first channel that fits your system. Every command below uses the placeholder
-repository `OWNER/anchor`; replace `OWNER` with the real GitHub account (and, for the apt and dnf
-repositories, use the real base URL: `https://OWNER.github.io/anchor` is the default GitHub Pages
+repository `David-A-Phillips/anchor`; replace `OWNER` with the real GitHub account (and, for the apt and dnf
+repositories, use the real base URL: `https://David-A-Phillips.github.io/anchor` is the default GitHub Pages
 address). The OS package is called **`anchor-context`** because Debian and Fedora already have
 unrelated packages called `anchor`; the command it installs is still `anchor`.
 
@@ -25,13 +25,13 @@ point `ollama.base_url` at it. The `git` command-line tool is an optional runtim
 ```sh
 # 1. Trust the repository's signing key (a keyring only this one source uses).
 sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://OWNER.github.io/anchor/apt/anchor-archive-keyring.gpg \
+curl -fsSL https://David-A-Phillips.github.io/anchor/apt/anchor-archive-keyring.gpg \
   | sudo tee /etc/apt/keyrings/anchor.gpg >/dev/null
 
 # 2. Add the source (deb822 format).
 sudo tee /etc/apt/sources.list.d/anchor.sources >/dev/null <<'EOF'
 Types: deb
-URIs: https://OWNER.github.io/anchor/apt
+URIs: https://David-A-Phillips.github.io/anchor/apt
 Suites: stable
 Components: main
 Signed-By: /etc/apt/keyrings/anchor.gpg
@@ -43,7 +43,7 @@ sudo apt-get install anchor-context
 ```
 
 (`anchor.sources` is also published next to the repository: `curl -fsSL
-https://OWNER.github.io/anchor/anchor.sources | sudo tee /etc/apt/sources.list.d/anchor.sources`.)
+https://David-A-Phillips.github.io/anchor/anchor.sources | sudo tee /etc/apt/sources.list.d/anchor.sources`.)
 
 Or install a single file from a GitHub Release without adding a repository:
 
@@ -91,12 +91,12 @@ before exposing it beyond localhost.
 ## 2. Fedora, RHEL and derivatives (dnf)
 
 ```sh
-sudo curl -fsSLo /etc/yum.repos.d/anchor.repo https://OWNER.github.io/anchor/anchor.repo
+sudo curl -fsSLo /etc/yum.repos.d/anchor.repo https://David-A-Phillips.github.io/anchor/anchor.repo
 sudo dnf install anchor-context
 ```
 
 The `.repo` file turns on `repo_gpgcheck` (the repository metadata is signed; the key is fetched
-from `https://OWNER.github.io/anchor/rpm/RPM-GPG-KEY-anchor` and dnf asks you to confirm its
+from `https://David-A-Phillips.github.io/anchor/rpm/RPM-GPG-KEY-anchor` and dnf asks you to confirm its
 fingerprint). The individual RPMs are not signed: integrity comes from the signed metadata and
 from the checksums and provenance attestation on the GitHub Release. Install one file directly:
 `sudo dnf install ./anchor-context-<version>-1.x86_64.rpm`.
@@ -111,11 +111,11 @@ from the checksums and provenance attestation on the GitHub Release. Install one
 ## 3. Homebrew (macOS and Linux)
 
 ```sh
-brew install OWNER/tap/anchor        # taps OWNER/homebrew-tap on first use
+brew install David-A-Phillips/tap/anchor        # taps David-A-Phillips/homebrew-tap on first use
 ```
 
 - **Upgrade:** `brew update && brew upgrade anchor`
-- **Uninstall:** `brew uninstall anchor` (and `brew untap OWNER/tap` if you wish).
+- **Uninstall:** `brew uninstall anchor` (and `brew untap David-A-Phillips/tap` if you wish).
 - **Service:** `anchor init` first, then `brew services start anchor` (launchd on macOS, systemd
   user service on Linux); logs in `$(brew --prefix)/var/log/anchor.log`.
 - Completions (bash, zsh, fish) and the man page are installed by the formula. The formula installs
@@ -125,8 +125,8 @@ brew install OWNER/tap/anchor        # taps OWNER/homebrew-tap on first use
 ## 4. Install script
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OWNER/anchor/main/scripts/install.sh \
-  | ANCHOR_REPO=OWNER/anchor sh
+curl -fsSL https://raw.githubusercontent.com/David-A-Phillips/anchor/main/scripts/install.sh \
+  | ANCHOR_REPO=David-A-Phillips/anchor sh
 ```
 
 The script detects your OS and CPU, downloads `anchor-<version>-<target>.tar.gz` and its
@@ -135,7 +135,7 @@ The script detects your OS and CPU, downloads `anchor-<version>-<target>.tar.gz`
 
 | Variable | Meaning |
 |----------|---------|
-| `ANCHOR_REPO` | GitHub `owner/name` (default is the placeholder `OWNER/anchor`) |
+| `ANCHOR_REPO` | GitHub `owner/name` (default is the placeholder `David-A-Phillips/anchor`) |
 | `ANCHOR_VERSION` | Version without the `v` (default: latest release) |
 | `ANCHOR_INSTALL_DIR` | Install directory (default `~/.local/bin`) |
 | `ANCHOR_BASE_URL` | Directory URL holding the archive and checksum, for a mirror or air-gapped host; requires `ANCHOR_VERSION` |
@@ -145,7 +145,7 @@ The script detects your OS and CPU, downloads `anchor-<version>-<target>.tar.gz`
   or newer.
 - Releases also carry `SHA256SUMS` (and `SHA256SUMS.asc`, a detached GPG signature, when the
   maintainers configured a signing key) and build-provenance attestations
-  (`gh attestation verify <file> --repo OWNER/anchor`).
+  (`gh attestation verify <file> --repo David-A-Phillips/anchor`).
 
 ## 5. Team server in Docker
 
@@ -186,9 +186,9 @@ bundled, protobuf is compiled by `protox`); a C compiler is needed for SQLite, z
 tree-sitter.
 
 ```sh
-cargo binstall --git https://github.com/OWNER/anchor anchor      # prebuilt archive (untested)
-cargo install --git https://github.com/OWNER/anchor --locked      # compile from source
-git clone https://github.com/OWNER/anchor && cd anchor
+cargo binstall --git https://github.com/David-A-Phillips/anchor anchor      # prebuilt archive (untested)
+cargo install --git https://github.com/David-A-Phillips/anchor --locked      # compile from source
+git clone https://github.com/David-A-Phillips/anchor && cd anchor
 cargo install --path . --locked      # or: cargo build --release
 ```
 
@@ -205,14 +205,14 @@ Not yet exercised on real Windows machines (the release workflow builds the arch
 # verify it against the .sha256 file, unpack it and put anchor.exe on your PATH.
 
 # Scoop (manifest in packaging/scoop/anchor.json; add it to a bucket first):
-scoop install https://raw.githubusercontent.com/OWNER/anchor/main/packaging/scoop/anchor.json
+scoop install https://raw.githubusercontent.com/David-A-Phillips/anchor/main/packaging/scoop/anchor.json
 
 # winget (after the manifest in packaging/winget/ is accepted by winget-pkgs):
-winget install OWNER.Anchor
+winget install David-A-Phillips.Anchor
 ```
 
-Upgrade: `scoop update anchor` / `winget upgrade OWNER.Anchor`. Uninstall: `scoop uninstall anchor`
-/ `winget uninstall OWNER.Anchor`. There is no Windows service wrapper yet; run `anchor daemon` from
+Upgrade: `scoop update anchor` / `winget upgrade David-A-Phillips.Anchor`. Uninstall: `scoop uninstall anchor`
+/ `winget uninstall David-A-Phillips.Anchor`. There is no Windows service wrapper yet; run `anchor daemon` from
 a terminal or a Task Scheduler task.
 
 Arch Linux: `packaging/aur/PKGBUILD` (package `anchor-context-bin`, untested). Nix:

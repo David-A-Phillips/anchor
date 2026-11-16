@@ -1,6 +1,6 @@
 # UNTESTED (Nix is not installed where this was written). Build from source:
 #   nix build ./packaging/nix   (the flake reads the repository two directories up)
-# For `nix run github:OWNER/anchor`, move this file to the repository root and set src = ./.;
+# For `nix run github:David-A-Phillips/anchor`, move this file to the repository root and set src = ./.;
 # then `nix flake lock` and commit flake.lock.
 {
   description = "Anchor: local-first context engine and sync daemon";
@@ -31,9 +31,8 @@
           '';
           meta = {
             description = "Local-first context engine and sync daemon that grounds AI models in your codebases";
-            homepage = "https://github.com/OWNER/anchor";
-            # TODO(owner): set the real license, e.g. pkgs.lib.licenses.mit
-            license = pkgs.lib.licenses.unfree;
+            homepage = "https://github.com/David-A-Phillips/anchor";
+            license = pkgs.lib.licenses.mit;
             mainProgram = "anchor";
           };
         };

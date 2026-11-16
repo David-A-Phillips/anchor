@@ -10,8 +10,8 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Local-first context engine and sync daemon that grounds AI models in your codebases (prebuilt binary)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/OWNER/anchor"
-license=('custom:TODO(owner)') # TODO(owner): SPDX identifier, and ship the license file below
+url="https://github.com/David-A-Phillips/anchor"
+license=('MIT')
 depends=('glibc' 'gcc-libs')
 optdepends=('git: history and blame' 'github-cli: fetch from GitHub')
 provides=('anchor')
@@ -27,7 +27,7 @@ package() {
   cd "$srcdir/anchor-$pkgver-$CARCH-unknown-linux-gnu"
   install -Dm755 anchor "$pkgdir/usr/bin/anchor"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-  # TODO(owner): install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 
   install -dm755 "$pkgdir/usr/share/bash-completion/completions" \
     "$pkgdir/usr/share/zsh/site-functions" "$pkgdir/usr/share/fish/vendor_completions.d" \
