@@ -11,6 +11,8 @@
 //! * `search`: entities by name or alias.
 //! * `get`: one entity with its attributes, relationships and text.
 //! * `path`: the most trustworthy path between two entities.
+//! * `why`: the trail from a file, line range or symbol to the commits, pull requests, review
+//!   decisions, tickets and pages that explain it.
 //! * `deepen`: ingest a shallow source more deeply, then ask again.
 //! * `status`: what is indexed and at which depth.
 
@@ -113,6 +115,19 @@ pub fn tools() -> Vec<Value> {
                 "to": { "type": "string", "description": "Key or name of the end entity." },
             }),
             &["from", "to"],
+        ),
+        tool(
+            "why",
+            "Explain why code is the way it is (a deeper git blame). Blames the given lines, then \
+             follows each responsible commit to the pull request that carried it, the review \
+             decisions and threads on it (including dismissed ones and why they were dismissed), \
+             the tickets it tracks with their status and blockers, and wiki pages discussing \
+             them. Reports where the trail ends (e.g. a commit with no pull request). Use this \
+             before changing code whose purpose is unclear.",
+            json!({
+                "target": { "type": "string", "description": "`path`, `path:line`, `path:start-end` (path absolute, or relative to a repository; prefix `source:` when the same path exists in several), or a symbol name." },
+            }),
+            &["target"],
         ),
         tool(
             "deepen",
@@ -485,6 +500,13 @@ impl McpServer {
             "search" => self.search(args).await,
             "get" => self.get(args).await,
             "path" => self.path(args).await,
+            "why" => {
+                let target = string_arg(args, "target")?.to_owned();
+                let report = self
+                    .blocking(move |server| server.engine.why(&target))
+                    .await?;
+                Ok(serde_json::to_value(report)?)
+            }
             "deepen" => self.deepen(args).await,
             "status" => self.status().await,
             other => Err(Error::not_found(format!("unknown tool `{other}`"))),

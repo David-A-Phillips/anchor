@@ -14,7 +14,9 @@ pub fn unit_in_depth(kind: UnitKind, depth: Depth) -> bool {
             kind,
             UnitKind::RepoMeta | UnitKind::Ownership | UnitKind::OrgModel | UnitKind::ApiSpec
         ),
-        Depth::Map | Depth::Full => true,
+        // History is detail: it comes with full depth only.
+        Depth::Map => kind != UnitKind::Commit,
+        Depth::Full => true,
     }
 }
 

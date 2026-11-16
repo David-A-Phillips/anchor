@@ -1,7 +1,7 @@
 //! The running engine: opens every component, ingests sources into the unified graph and keeps
 //! the in-memory graph in lockstep with the store.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -946,6 +946,9 @@ impl Engine {
             }
         }
         self.apply_batch(&mut batch, report)?;
+        if self.depth(id) == Depth::Full && self.config.history.enabled {
+            self.scan_history(id, root, report, produced)?;
+        }
         if !self.config.parser.keep_unresolved_references {
             self.store.prune_pending(
                 id,
@@ -953,6 +956,55 @@ impl Engine {
             )?;
         }
         Ok(true)
+    }
+
+    /// Ingests the repository's recent commits. Commits never change, so only those not seen
+    /// before are read into units; the rest are just kept.
+    fn scan_history(
+        &self,
+        id: &SourceId,
+        root: &Path,
+        report: &mut ScanReport,
+        produced: &mut BTreeSet<UnitKey>,
+    ) -> Result<()> {
+        use super::history;
+        if !history::is_work_tree(root) {
+            return Ok(());
+        }
+        let settings = &self.config.history;
+        let commits = match history::log(root, settings.max_commits) {
+            Ok(commits) => commits,
+            Err(err) => {
+                report.warnings.push(format!("history: {err}"));
+                return Ok(());
+            }
+        };
+        let known: HashSet<UnitKey> = self
+            .store
+            .unit_metas(id)?
+            .into_iter()
+            .filter(|meta| !meta.deleted)
+            .map(|meta| meta.key)
+            .collect();
+        let names = history::repo_names(root, id);
+        let mut batch = Vec::with_capacity(BATCH);
+        for commit in &commits {
+            let key = keys::unit(id, UnitKind::Commit, &commit.sha);
+            produced.insert(key.clone());
+            if known.contains(&key) {
+                continue;
+            }
+            batch.push(history::commit_unit(
+                id,
+                commit,
+                &names,
+                settings.max_files_per_commit,
+            ));
+            if batch.len() >= BATCH {
+                self.apply_batch(&mut batch, report)?;
+            }
+        }
+        self.apply_batch(&mut batch, report)
     }
 
     /// The source whose root contains `path`, with the path relative to that root.

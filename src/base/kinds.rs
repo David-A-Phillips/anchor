@@ -116,6 +116,8 @@ string_enum! {
         File = 10 => "file",
         /// A code symbol (function, type, method, ...).
         Symbol = 11 => "symbol",
+        /// A commit in a repository's history.
+        Commit = 12 => "commit",
         // --- APIs -----------------------------------------------------------------------------
         /// An API definition (e.g. one OpenAPI document).
         ApiSpec = 20 => "api_spec",
@@ -211,6 +213,8 @@ string_enum! {
         Consumes = 14 => "consumes",
         /// Service|Component depends on Service|Component.
         DependsOn = 15 => "depends_on",
+        /// Commit modifies a File.
+        Modifies = 16 => "modifies",
         // --- knowledge ------------------------------------------------------------------------
         /// WikiPage (or documentation File) is the documentation of an entity.
         Documents = 20 => "documents",
@@ -283,6 +287,8 @@ string_enum! {
         PullRequest = 8 => "pull_request",
         /// A model-written summary and tags for one node.
         Enrichment = 9 => "enrichment",
+        /// One commit of a repository's history.
+        Commit = 10 => "commit",
     }
 }
 

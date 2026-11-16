@@ -17,6 +17,7 @@ pub mod depth;
 pub mod embed;
 pub mod enrich;
 pub mod graph;
+pub mod history;
 pub mod ingest;
 pub mod parser;
 pub mod pipeline;
@@ -24,5 +25,6 @@ pub mod query;
 pub mod router;
 pub mod store;
 pub mod watcher;
+pub mod why;
 
 pub use core::{Engine, EngineEvent, LatencyStats, RemoteTiles, ScanReport};

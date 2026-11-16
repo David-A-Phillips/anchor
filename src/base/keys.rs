@@ -35,6 +35,7 @@ const PREFIXES: &[(&str, NodeKind)] = &[
     ("person", NodeKind::Person),
     ("file", NodeKind::File),
     ("symbol", NodeKind::Symbol),
+    ("commit", NodeKind::Commit),
     ("api", NodeKind::ApiSpec),
     ("endpoint", NodeKind::ApiEndpoint),
     ("approval", NodeKind::Approval),
@@ -196,6 +197,15 @@ pub fn comment(source: &SourceId, id: &str) -> NodeKey {
 /// Key of a [`NodeKind::Ticket`]; tracker keys are upper-cased (`pay-123` → `ticket:PAY-123`).
 pub fn ticket(issue_key: &str) -> NodeKey {
     NodeKey::new(format!("ticket:{}", issue_key.trim().to_ascii_uppercase()))
+}
+
+/// Key of a [`NodeKind::Commit`]: the full hash within its repository source.
+pub fn commit(source: &SourceId, sha: &str) -> NodeKey {
+    NodeKey::new(format!(
+        "commit:{}:{}",
+        source,
+        sha.trim().to_ascii_lowercase()
+    ))
 }
 
 /// Key of a [`NodeKind::PullRequest`].

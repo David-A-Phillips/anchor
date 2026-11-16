@@ -131,7 +131,10 @@ async fn an_agent_can_ask_see_shallow_areas_deepen_and_ask_again() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["ask", "search", "get", "path", "deepen", "status"]);
+    assert_eq!(
+        names,
+        ["ask", "search", "get", "path", "why", "deepen", "status"]
+    );
     for tool in listed["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object");
         assert!(!tool["description"].as_str().unwrap().is_empty());

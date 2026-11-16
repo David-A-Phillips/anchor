@@ -114,6 +114,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Explain why code is the way it is: blame the lines, then follow each commit to its pull
+    /// request, review decisions, tickets and the pages that discuss them.
+    Why {
+        /// `path`, `path:line`, `path:start-end`, `source:path[:lines]` or a symbol name.
+        target: String,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Compare Anchor with plain retrieval and with other RAG systems on the same questions.
     Compare {
         /// Working directory: `questions.jsonl` and `results/<system>.jsonl`.
@@ -872,6 +881,17 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", eval::render(&report));
             }
             engine.flush()?;
+        }
+        Command::Why { target, json } => {
+            let (config, _) = load_config(&cli.config)?;
+            let engine = open_engine(config).await?;
+            let asked = engine.clone();
+            let report = tokio::task::spawn_blocking(move || asked.why(&target)).await??;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", crate::engine::why::render(&report));
+            }
         }
         Command::Compare {
             dir,

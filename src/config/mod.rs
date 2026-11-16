@@ -253,6 +253,8 @@ pub struct AnchorConfig {
     pub embeddings: EmbeddingConfig,
     /// Code parser (`[parser]`).
     pub parser: ParserConfig,
+    /// Git history ingestion (`[history]`).
+    pub history: crate::engine::history::HistoryConfig,
     /// Graph traversal and trust weighting (`[graph]`).
     pub graph: GraphConfig,
     /// Query engine (`[query]`).
