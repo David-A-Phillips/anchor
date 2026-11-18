@@ -1,0 +1,44 @@
+name: Multi-hop retrieval
+
+# The standard multi-hop benchmarks (docs/benchmarks.md), without a model: fails if retrieval
+# falls clearly below the published figures. Weekly and on demand; it downloads about 40 MB.
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  multihop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Download the HippoRAG 2 release of the datasets
+        run: |
+          mkdir -p data/hippo
+          for f in musique 2wikimultihopqa hotpotqa; do
+            curl -sSfL -o data/hippo/$f.json https://huggingface.co/datasets/osunlp/HippoRAG_2/resolve/main/$f.json
+            curl -sSfL -o data/hippo/${f}_corpus.json https://huggingface.co/datasets/osunlp/HippoRAG_2/resolve/main/${f}_corpus.json
+          done
+      - name: Ingest
+        run: |
+          python3 scripts/bench/multihop.py prepare data/hippo work
+          for f in musique 2wikimultihopqa hotpotqa; do
+            target/release/anchor --config work/$f/anchor.toml ingest
+          done
+      - name: Score
+        run: |
+          python3 scripts/bench/multihop.py run data/hippo work --anchor target/release/anchor \
+            --require musique:recall@2=33.5 --require musique:recall@5=46 \
+            --require 2wikimultihopqa:recall@2=68 --require 2wikimultihopqa:recall@5=89.5 \
+            --require hotpotqa:recall@2=58 --require hotpotqa:recall@5=76
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multihop-scores
+          path: work/scores.json

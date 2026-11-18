@@ -758,12 +758,17 @@ impl QueryEngine {
                 let mut seen = HashSet::new();
                 nodes.filter(|node| seen.insert(*node)).collect::<Vec<_>>()
             };
-            let by_name = dedup(
-                &mut store
-                    .search_nodes(&request.query, &[], 5)?
-                    .into_iter()
-                    .map(|hit| hit.node),
-            );
+            // Only names the question actually contains: a name sharing one common word with
+            // it ("the", "are") says nothing about relevance.
+            let mut named = Vec::new();
+            for hit in store.search_nodes(&request.query, &[], 20)? {
+                if let Some(node) = store.node(hit.node)?
+                    && fusion::names(&request.query, &node.name)
+                {
+                    named.push(hit.node);
+                }
+            }
+            let by_name = dedup(&mut named.into_iter());
             let by_text = dedup(&mut text_hits.iter().map(|hit| hit.node));
             let mut rankings = vec![by_name, by_text];
             // Hash vectors restate the full-text search; only a neural model's vectors add a

@@ -314,7 +314,7 @@ passages (the gold and distractor passages of all the questions).
 
 | System | MuSiQue | 2Wiki | HotpotQA | Average |
 |---|---|---|---|---|
-| **Anchor** (no model, default configuration) | 30.0 / 44.0 | 60.6 / 85.6 | 52.6 / 75.2 | 47.7 / 68.3 |
+| **Anchor** (no model, default configuration) | 35.3 / 47.8 | 70.0 / 91.0 | 59.9 / 77.6 | 55.1 / 72.1 |
 | Anchor 0.1.1 | 26.9 / 42.6 | 60.5 / 66.7 | 44.6 / 68.8 | 44.0 / 59.4 |
 | BM25, this harness | 34.1 / 44.6 | 55.5 / 65.8 | 56.1 / 72.8 | 48.6 / 61.1 |
 | *Published (HippoRAG 2 paper, Table 9):* | | | | |
@@ -329,16 +329,16 @@ passages (the gold and distractor passages of all the questions).
 Recall@2 / recall@5, in percent. Published rows are from Gutiérrez et al., *From RAG to Memory:
 Non-Parametric Continual Learning for Large Language Models* (ICML 2025, arXiv 2502.14802v2),
 Table 9; the averages here are over these three datasets only. GraphRAG and LightRAG are not in
-that table because they do not return ranked passages. Recall@10 for Anchor: 54.1, 94.6 and 86.8
+that table because they do not return ranked passages. Recall@10 for Anchor: 56.6, 95.0 and 88.6
 (BM25: 52.2, 70.5, 86.2).
 
-**What it shows.** Without any model, Anchor's average recall@5 (68.3) is above BM25's (61.1)
-and the small dense retrievers' (59.8, 63.6). Per dataset, it is far ahead on 2WikiMultiHopQA,
-within five points of HippoRAG (which builds its graph with a 70B model), level with BM25 and the
-dense retrievers on HotpotQA, and level with BM25 but below them on MuSiQue. It remains well below
-HippoRAG 2 and a 7B embedding model on MuSiQue and HotpotQA, and its recall@2 is below BM25's on
-those two: the passage that shares the question's words is usually found, the second hop is less
-often ranked first.
+**What it shows.** Without any model, Anchor's average recall@5 (72.1) is above BM25's (61.1),
+the small dense retrievers' (59.8, 63.6) and RAPTOR's (70.3), and below HippoRAG's (73.6) and
+HippoRAG 2's (87.1), both of which build their graph with a 70B model. On 2WikiMultiHopQA, whose
+questions name the entities they are about, it matches HippoRAG 2 (91.0 against 90.4). On
+HotpotQA it is above BM25 and the small dense retrievers and well below a 7B embedding model; on
+MuSiQue it is above BM25 and Contriever and below GTR and the larger systems. Its recall@2 is
+above BM25's on all three.
 
 **Where the gain comes from.** Wikipedia passages carry no owners, imports or explicit links, so
 until this release Anchor's graph over them had nodes and no edges, and retrieval was its
@@ -347,19 +347,25 @@ full-text search. Two changes, each measured on its own:
 | Change | MuSiQue | 2Wiki | HotpotQA |
 |---|---|---|---|
 | 0.1.1 | 26.9 / 42.6 | 60.5 / 66.7 | 44.6 / 68.8 |
-| Ranking: fused search, relevance spread along links | 32.6 / 43.0 | 59.6 / 66.3 | 50.4 / 67.6 |
-| ... and pages linked by the titles they name | 30.0 / 44.0 | 60.6 / 85.6 | 52.6 / 75.2 |
+| Ranking: fused search, relevance spread along links | 35.8 / 45.5 | 63.2 / 67.5 | 59.0 / 72.0 |
+| ... and pages linked by the titles they name | 32.8 / 46.6 | 70.0 / 91.0 | 59.8 / 77.5 |
+| ... with links through common titles weighted down | 35.3 / 47.8 | 70.0 / 91.0 | 59.9 / 77.6 |
 
 - **Title links** (`graph.title_links`, on by default). After a full scan, every wiki page title
   is matched, case-sensitively and on word boundaries, against the text of every other page, and
   each match becomes a `Mentions` link. This needs no model and takes 0.5 to 1.8 seconds per
-  corpus; it finds 2,120 links in 2WikiMultiHopQA, 4,867 in HotpotQA and 13,270 in MuSiQue.
+  corpus; it finds 2,120 links in 2WikiMultiHopQA, 4,867 in HotpotQA and 13,270 in MuSiQue. A
+  title that more than ten pages name links with proportionally less weight, as inverse
+  document frequency weights common words, so relevance flows mostly through specific links.
 - **Ranking for open questions.** When a question names nothing Anchor can resolve and asks for
   no particular kind of answer, the node-name, full-text and (with a neural embedding model)
   vector searches are merged by reciprocal rank fusion, and each of the five best candidates
-  passes three quarters of its score along its links: a one-step, personalised PageRank. Without
-  links this mostly reorders the top of the list (recall@2 up, recall@5 level); with links, the
-  second passage of a two-hop question comes into the top five.
+  passes three quarters of its score along its links: a one-step, personalised PageRank. A node
+  name counts only when the question contains it whole: names that merely share a common word
+  with the question cost HotpotQA six points of recall@2. Without links this mainly improves the
+  top of the list; with links, the second passage of a two-hop question comes into the top five.
+  Anchor's full-text search on its own scores as BM25 does (34.2 / 44.0, 56.1 / 66.0,
+  56.5 / 73.4), so the gains are the ranking's and the links'.
 
 Questions about owners, dependencies and the other answer kinds keep their previous seeding; on
 the synthetic benchmark above every context and every answer is identical before and after.
@@ -374,9 +380,15 @@ model and both on all three datasets, under the new ranking, are prepared but no
 the text), ingests them as one wiki source with the default configuration and no model, and asks
 every question with `anchor query --retrieval-only`. A passage's rank is the position of its page
 among the returned items. The three ranking constants (`RRF_K` 10, `SPREAD` 0.75, `SPREAD_FROM`
-5 in `src/engine/query/fusion.rs`) were chosen from eight settings on the first 300 questions of
-each dataset; on the other 700 alone, Anchor scores 30.5 / 44.9, 60.7 / 85.2 and 52.3 / 74.1
-(BM25: 35.0 / 45.7, 55.1 / 65.0, 56.2 / 72.6), in line with the full sets. The same script scores
+5 in `src/engine/query/fusion.rs`) were chosen from eight settings, and the whole-name rule
+tried, on the first 300 questions of each dataset; on the other 700 alone, Anchor scores
+35.6 / 48.3, 70.0 / 90.9 and 59.9 / 76.8 (BM25: 35.0 / 45.7, 55.1 / 65.0, 56.2 / 72.6), in line
+with the full sets. Tried on the same questions and not kept, because they were mixed or worse:
+a higher weight for titles in full-text search, case-insensitive and base-name ("Paris" for
+"Paris (film)") title matching, dropping links through common titles instead of weighting them,
+and a second step of relevance spreading. A weekly CI job (`.github/workflows/multihop.yml`) reruns the benchmark and
+fails below set scores, and `tests/multihop.rs` checks two-hop retrieval on a generated corpus
+in every `cargo test`. The same script scores
 an Okapi BM25 (k1 1.5, b 0.75) over the same passages, which reproduces the published BM25 figures
 to within two points: a check that the corpus, gold passages and scoring match the papers'. A
 question takes about 18 ms including process start; 3,000 take under half a minute with eight
@@ -384,8 +396,9 @@ parallel processes.
 
 **Caveats.** Recall measures retrieval only, not answers. The published rows were run by the
 paper's authors on their hardware with their implementation; only the two BM25 rows were run here.
-Title links help most where pages are named by their exact titles, as in Wikipedia and in many
-engineering wikis; MuSiQue's questions and passages often use other names, and gain little.
+Title links and whole-name matching help most where pages are named by their exact titles, as in
+Wikipedia and in many engineering wikis; MuSiQue's questions and passages often use other names,
+and gain least.
 
 Reproduce:
 

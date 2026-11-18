@@ -183,6 +183,17 @@ def run(args):
             for q, r, g in zip(questions, anchor, golds):
                 out.write(json.dumps({"id": q.get("id") or q.get("_id"), "anchor": r[:10], "gold": sorted(g)}) + "\n")
     json.dump(results, open(Path(args.work) / "scores.json", "w"), indent=2)
+    failed = []
+    for requirement in args.require:
+        target, minimum = requirement.split("=")
+        name, metric = target.split(":")
+        score = results.get(name, {}).get("anchor", {}).get(metric)
+        if score is None or score < float(minimum):
+            failed.append(f"{name} {metric} {score} < {minimum}")
+    if failed:
+        print("below the required scores:\n  " + "\n  ".join(failed), file=sys.stderr)
+        return 1
+    return 0
 
 
 def main():
@@ -201,8 +212,15 @@ def main():
     r.add_argument("--datasets", nargs="+", choices=DATASETS, default=DATASETS)
     r.add_argument("--config-name", default="anchor.toml", help="configuration file in each dataset's directory")
     r.add_argument("--no-bm25", action="store_true", help="score Anchor only")
+    r.add_argument(
+        "--require",
+        action="append",
+        default=[],
+        metavar="DATASET:METRIC=MIN",
+        help="exit 1 if Anchor scores below MIN (e.g. hotpotqa:recall@5=76); repeatable",
+    )
     args = parser.parse_args()
-    {"prepare": prepare, "run": run}[args.command](args)
+    return {"prepare": prepare, "run": run}[args.command](args)
 
 
 if __name__ == "__main__":

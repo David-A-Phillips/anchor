@@ -69,6 +69,21 @@ where
     sorted(scores)
 }
 
+/// Whether `text` contains `name` as whole words, ignoring case (names shorter than four
+/// characters never count).
+pub fn names(text: &str, name: &str) -> bool {
+    let name = name.trim();
+    if name.chars().count() < 4 {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let name = name.to_lowercase();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    text.match_indices(&name).any(|(at, found)| {
+        !word(text[..at].chars().next_back()) && !word(text[at + found.len()..].chars().next())
+    })
+}
+
 fn sorted(scores: HashMap<NodeId, (f32, usize)>) -> Vec<(NodeId, f32)> {
     let mut out: Vec<(NodeId, f32, usize)> = scores
         .into_iter()
@@ -87,6 +102,16 @@ mod tests {
 
     fn n(id: i64) -> NodeId {
         NodeId(id)
+    }
+
+    #[test]
+    fn a_name_counts_only_when_the_question_contains_it_whole() {
+        let question = "Are Marufabad and Nasamkhrali both in the same country?";
+        assert!(names(question, "Marufabad"));
+        assert!(names(question, "nasamkhrali"), "case is ignored");
+        assert!(!names(question, "Even the Nights Are Better"));
+        assert!(!names(question, "Maru"), "part of a word");
+        assert!(!names(question, "the"), "too short");
     }
 
     #[test]

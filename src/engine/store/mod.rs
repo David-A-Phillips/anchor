@@ -253,6 +253,10 @@ pub struct ApplyOutcome {
     pub chunks_upserted: Vec<ChunkId>,
     /// Chunks removed (to be dropped from the vector index).
     pub chunks_removed: Vec<ChunkId>,
+    /// Nodes whose text chunks were written or removed.
+    pub chunk_nodes: Vec<NodeId>,
+    /// Units whose content differed from what was stored (the rest were already current).
+    pub units_changed: usize,
 }
 
 impl ApplyOutcome {
@@ -262,6 +266,8 @@ impl ApplyOutcome {
         self.changed |= other.changed;
         self.chunks_upserted.extend(other.chunks_upserted);
         self.chunks_removed.extend(other.chunks_removed);
+        self.chunk_nodes.extend(other.chunk_nodes);
+        self.units_changed += other.units_changed;
     }
 }
 
@@ -461,6 +467,7 @@ struct Touched {
     names: BTreeSet<String>,
     chunks_upserted: Vec<ChunkId>,
     chunks_removed: Vec<ChunkId>,
+    chunk_nodes: BTreeSet<i64>,
 }
 
 fn read_graph_node(tx: &Connection, id: i64) -> Result<Option<GraphNode>> {
@@ -544,6 +551,8 @@ impl Touched {
             changed,
             chunks_upserted: self.chunks_upserted,
             chunks_removed: self.chunks_removed,
+            chunk_nodes: self.chunk_nodes.into_iter().map(NodeId).collect(),
+            units_changed: 0,
         })
     }
 }
@@ -1136,6 +1145,7 @@ fn write_unit_view(
         tx.prepare_cached("INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)")?
             .execute(params![id, chunk.text])?;
         touched.chunks_upserted.push(ChunkId(id));
+        touched.chunk_nodes.insert(node_id);
     }
     for (_, stale) in old {
         delete_chunk(tx, touched, stale.id, &stale.text)?;
@@ -1202,9 +1212,12 @@ fn normalized_text(reference: &NodeRef) -> String {
 fn delete_chunk(tx: &Connection, touched: &mut Touched, id: i64, text: &str) -> Result<()> {
     tx.prepare_cached("INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', ?1, ?2)")?
         .execute(params![id, text])?;
-    tx.prepare_cached("DELETE FROM chunks WHERE id = ?1")?
-        .execute([id])?;
+    let node: Option<i64> = tx
+        .prepare_cached("DELETE FROM chunks WHERE id = ?1 RETURNING node_id")?
+        .query_row([id], |row| row.get(0))
+        .optional()?;
     touched.chunks_removed.push(ChunkId(id));
+    touched.chunk_nodes.extend(node);
     Ok(())
 }
 
@@ -1597,19 +1610,23 @@ impl GraphStore {
 
     /// Applies many units in one transaction, all stamped with `version`.
     pub fn apply_units(&self, units: &[Unit], version: &UnitVersion) -> Result<ApplyOutcome> {
-        self.write(|tx, touched| {
-            let mut changed = false;
+        let mut count = 0;
+        let mut outcome = self.write(|tx, touched| {
             for unit in units {
                 let mut unit = unit.clone();
                 unit.canonicalize();
                 let hash = unit.content_hash()?;
-                changed |= write_unit(tx, touched, &unit, hash, version)?;
+                if write_unit(tx, touched, &unit, hash, version)? {
+                    count += 1;
+                }
             }
             // One linking pass for the whole batch: names touched by any unit are re-examined
             // once, however many units mention them.
             relink(tx, touched)?;
-            Ok(changed)
-        })
+            Ok(count > 0)
+        })?;
+        outcome.units_changed = count;
+        Ok(outcome)
     }
 
     /// Removes a unit's assertions and leaves a tombstone. Unknown units are a no-op.
@@ -2061,6 +2078,28 @@ impl GraphStore {
                 });
             }
             Ok(out)
+        })
+    }
+
+    /// Nodes having a text chunk that contains `phrase` (full-text phrase match, so word
+    /// boundaries and case follow the full-text tokenizer), at most `limit`.
+    pub fn nodes_with_phrase(&self, phrase: &str, limit: usize) -> Result<Vec<NodeId>> {
+        let words: Vec<&str> = phrase
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .filter(|word| !word.is_empty())
+            .collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fts = format!("\"{}\"", words.join(" "));
+        self.db.read(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT DISTINCT c.node_id FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
+                 WHERE chunks_fts MATCH ?1 LIMIT ?2",
+            )?;
+            let rows =
+                statement.query_map(params![fts, limit as i64], |row| row.get::<_, i64>(0))?;
+            rows.map(|row| Ok(NodeId(row?))).collect()
         })
     }
 

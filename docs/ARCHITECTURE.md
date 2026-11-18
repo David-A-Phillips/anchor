@@ -150,9 +150,12 @@ its weight the greatest weight. The edge disappears with its last claim or eithe
 **Derived links.** Some links need the whole corpus. After a full scan, `engine::title_links`
 matches every wiki page title (case-sensitive, on word boundaries, at least four characters,
 naming at most three pages) against the text of every other page and records the matches as
-`Mentions` edges in one `Links` unit per linking page, under the built-in `reference_only` source
-`anchor-title-links`. Enrichment (`anchor enrich`) records the entities a model names the same way
-under `anchor-enrichment`. Both are ordinary units: rebuilt as pages change, removed with them,
+links of weight 0.75, scaled by `min(1, 10 / pages naming the title)` so common titles carry
+little relevance, as `Mentions` edges in one `Links` unit per linking page, under the built-in
+`reference_only` source `anchor-title-links`. The watcher keeps them current: after a wiki page
+changes, only that page and the pages whose text contains its title (found by a full-text phrase
+search) are recomputed. Enrichment (`anchor enrich`) records the entities a model names the same
+way under `anchor-enrichment`. Both are ordinary units: rebuilt as pages change, removed with them,
 and never able to override an authoritative fact.
 
 Conflicting facts are therefore distinct edges with distinct provenance — CODEOWNERS (SourceOfTruth)
@@ -269,8 +272,8 @@ graph have their own entry points (`engine::impact`), on the same consistent rea
    fallback. Initial graph filtering: entity mentions are resolved through the alias index,
    full-text search and the vector index into seed nodes, optionally re-ranked by the local model.
    An *open* question (nothing resolved, no answer kind sought) starts instead from its searches
-   (`query::fusion`): node names, full text and, with a neural embedding model, vectors, merged
-   by reciprocal rank fusion; each of the five best candidates then passes part of its score
+   (`query::fusion`): node names the question contains whole, full text and, with a neural
+   embedding model, vectors, merged by reciprocal rank fusion; each of the five best candidates then passes part of its score
    along its links, so a passage linked from a strong match can outrank a weak match (a
    one-step personalised PageRank). That ranking leads the evidence. Questions seeking an answer
    kind keep their best name matches as seeds in order, since the answer is the nearest such

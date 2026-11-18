@@ -9,17 +9,21 @@
 //! disappear with the pages they point to.
 //!
 //! A title shared by more than [`MAX_PAGES_PER_TITLE`] pages is too generic to mean one page
-//! and is skipped.
+//! and is skipped. A title that many pages name (a "Music" or "Payments API" every other page
+//! mentions) still links, but more weakly: the weight is scaled by
+//! `min(1, COMMON_TITLE_PAGES / pages naming it)`, so relevance spread at query time flows mostly
+//! through specific links, the way inverse document frequency weights rare words.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Instant;
 
 use aho_corasick::{AhoCorasick, MatchKind};
 
 use super::core::{Engine, ScanReport};
+use super::store::NodeRecord;
 use crate::base::{
-    EdgeAssertion, EdgeKind, Error, NodeAssertion, NodeKey, NodeKind, Result, SourceDescriptor,
-    SourceId, SourceKind, TrustLevel, Unit, UnitKind, keys,
+    EdgeAssertion, EdgeKind, Error, NodeAssertion, NodeId, NodeKey, NodeKind, Result,
+    SourceDescriptor, SourceId, SourceKind, TrustLevel, Unit, UnitKind, keys,
 };
 
 /// Id of the built-in source that holds title links.
@@ -33,6 +37,8 @@ const MAX_LINKS_PER_PAGE: usize = 24;
 /// Edge weight: an exact title is stronger evidence than a model's guess (0.6), weaker than an
 /// explicit link (0.9).
 const WEIGHT: f32 = 0.75;
+/// A title named by more pages than this links with proportionally less weight.
+pub const COMMON_TITLE_PAGES: usize = 10;
 /// Units applied per write transaction.
 const BATCH: usize = 512;
 
@@ -61,9 +67,83 @@ fn matches(matcher: &AhoCorasick, text: &str) -> Vec<usize> {
     found
 }
 
+/// Every linkable title, the pages each names, and a matcher over them.
+struct TitleIndex {
+    /// Title and the pages it names, in pattern order.
+    patterns: Vec<(String, Vec<NodeKey>)>,
+    matcher: Option<AhoCorasick>,
+}
+
+impl TitleIndex {
+    fn new(pages: &[NodeRecord]) -> Result<Self> {
+        let mut by_title: BTreeMap<String, Vec<NodeKey>> = BTreeMap::new();
+        for page in pages {
+            let title = page.name.trim();
+            if linkable(title) {
+                by_title
+                    .entry(title.to_owned())
+                    .or_default()
+                    .push(page.key.clone());
+            }
+        }
+        by_title.retain(|_, keys| keys.len() <= MAX_PAGES_PER_TITLE);
+        let patterns: Vec<(String, Vec<NodeKey>)> = by_title.into_iter().collect();
+        let matcher = if patterns.is_empty() {
+            None
+        } else {
+            Some(
+                AhoCorasick::builder()
+                    .match_kind(MatchKind::LeftmostLongest)
+                    .build(patterns.iter().map(|(title, _)| title.as_str()))
+                    .map_err(|err| Error::other(format!("title matcher: {err}")))?,
+            )
+        };
+        Ok(Self { patterns, matcher })
+    }
+}
+
 impl Engine {
     /// Rebuilds the title links of every wiki page. Unchanged pages cost a hash comparison.
     pub fn link_titles(&self) -> Result<ScanReport> {
+        let pages = self
+            .store()
+            .nodes_by_kind(NodeKind::WikiPage, usize::MAX >> 1, 0)?;
+        let all: Vec<&NodeRecord> = pages.iter().collect();
+        let report = self.relink(&pages, &all, true)?;
+        // Everything is current: nothing is left for an incremental pass.
+        self.take_touched_pages();
+        Ok(report)
+    }
+
+    /// Brings title links up to date after the pages in `touched` changed: their own links, and
+    /// the links of every page whose text names one of their titles. Much cheaper than
+    /// [`Self::link_titles`] when few pages changed. A page that disappears takes its links with
+    /// it; links that pointed to it by a title nobody holds any more are dropped by the next full
+    /// pass.
+    pub fn relink_titles(&self, touched: &[NodeId]) -> Result<ScanReport> {
+        let store = self.store();
+        let pages = store.nodes_by_kind(NodeKind::WikiPage, usize::MAX >> 1, 0)?;
+        let touched: BTreeSet<NodeId> = touched.iter().copied().collect();
+        let mut affected: BTreeSet<NodeId> = BTreeSet::new();
+        for page in pages.iter().filter(|page| touched.contains(&page.id)) {
+            affected.insert(page.id);
+            let title = page.name.trim();
+            if linkable(title) {
+                affected.extend(store.nodes_with_phrase(title, 1000)?);
+            }
+        }
+        let subset: Vec<&NodeRecord> = pages.iter().filter(|p| affected.contains(&p.id)).collect();
+        self.relink(&pages, &subset, false)
+    }
+
+    /// Recomputes the link units of `subset` against the titles of all `pages`. With `complete`,
+    /// link units of pages outside `subset` are removed as well.
+    fn relink(
+        &self,
+        pages: &[NodeRecord],
+        subset: &[&NodeRecord],
+        complete: bool,
+    ) -> Result<ScanReport> {
         let started = Instant::now();
         let store = self.store();
         let source = SourceId::new(TITLE_LINK_SOURCE);
@@ -72,34 +152,19 @@ impl Engine {
             depth: "derived".to_owned(),
             ..ScanReport::default()
         };
-        let pages = store.nodes_by_kind(NodeKind::WikiPage, usize::MAX >> 1, 0)?;
-
-        let mut by_title: BTreeMap<&str, Vec<&NodeKey>> = BTreeMap::new();
-        for page in &pages {
-            let title = page.name.trim();
-            if linkable(title) {
-                by_title.entry(title).or_default().push(&page.key);
-            }
-        }
-        by_title.retain(|_, keys| keys.len() <= MAX_PAGES_PER_TITLE);
-        let titles: Vec<&str> = by_title.keys().copied().collect();
-        let targets: Vec<&Vec<&NodeKey>> = by_title.values().collect();
-
+        let index = TitleIndex::new(pages)?;
         let mut units = Vec::new();
-        if !titles.is_empty() {
+        if let Some(matcher) = &index.matcher {
             store.upsert_source(&SourceDescriptor {
                 id: source.clone(),
                 kind: SourceKind::Derived,
                 name: "Links between pages that name each other's titles".to_owned(),
                 trust: TrustLevel::ReferenceOnly,
             })?;
-            let matcher = AhoCorasick::builder()
-                .match_kind(MatchKind::LeftmostLongest)
-                .build(&titles)
-                .map_err(|err| Error::other(format!("title matcher: {err}")))?;
-            for page in &pages {
+            let mut named: Vec<(&NodeRecord, BTreeSet<usize>)> = Vec::new();
+            for page in subset {
                 report.files_seen += 1;
-                let mut linked: BTreeSet<&NodeKey> = BTreeSet::new();
+                let mut found = BTreeSet::new();
                 for chunk in store.chunks_of(page.id)? {
                     // Only the page's own text: derived chunks (model summaries) are not evidence.
                     if chunk.source.as_str() == TITLE_LINK_SOURCE
@@ -107,8 +172,42 @@ impl Engine {
                     {
                         continue;
                     }
-                    for pattern in matches(&matcher, &chunk.text) {
-                        linked.extend(targets[pattern].iter().copied());
+                    found.extend(matches(matcher, &chunk.text));
+                }
+                named.push((page, found));
+            }
+            // How many pages name each title: counted here on a full pass, by a phrase search
+            // when only some pages are recomputed.
+            let mut naming: HashMap<usize, usize> = HashMap::new();
+            if complete {
+                for (page, found) in &named {
+                    for pattern in found {
+                        // A page's own heading does not count as naming it.
+                        if !index.patterns[*pattern].1.contains(&page.key) {
+                            *naming.entry(*pattern).or_default() += 1;
+                        }
+                    }
+                }
+            } else {
+                let found: BTreeSet<usize> =
+                    named.iter().flat_map(|(_, f)| f.iter().copied()).collect();
+                for pattern in found {
+                    let count = store
+                        .nodes_with_phrase(&index.patterns[pattern].0, COMMON_TITLE_PAGES * 100)?
+                        .len();
+                    // The pages holding the title contain it in their own heading.
+                    let own = index.patterns[pattern].1.len();
+                    naming.insert(pattern, count.saturating_sub(own));
+                }
+            }
+            for (page, found) in named {
+                let mut linked: BTreeMap<&NodeKey, f32> = BTreeMap::new();
+                for pattern in &found {
+                    let pages = naming.get(pattern).copied().unwrap_or(1).max(1);
+                    let weight = WEIGHT * (COMMON_TITLE_PAGES as f32 / pages as f32).min(1.0);
+                    for key in &index.patterns[*pattern].1 {
+                        let w = linked.entry(key).or_insert(0.0);
+                        *w = w.max(weight);
                     }
                 }
                 linked.remove(&page.key);
@@ -122,10 +221,10 @@ impl Engine {
                 );
                 let from =
                     unit.add_node(NodeAssertion::new(page.kind, page.key.clone(), &page.name));
-                for target in linked.into_iter().take(MAX_LINKS_PER_PAGE) {
+                for (target, weight) in linked.into_iter().take(MAX_LINKS_PER_PAGE) {
                     unit.add_edge(
                         EdgeAssertion::new(&from, EdgeKind::Mentions, target.clone())
-                            .weight(WEIGHT),
+                            .weight(weight),
                     );
                 }
                 units.push(unit.finish());
@@ -133,19 +232,29 @@ impl Engine {
         }
 
         // Pages that no longer link to anything lose their unit.
-        let produced: HashMap<&str, ()> = units.iter().map(|u| (u.key.as_str(), ())).collect();
+        let produced: HashSet<&str> = units.iter().map(|u| u.key.as_str()).collect();
+        let considered: HashSet<String> = subset
+            .iter()
+            .map(|page| {
+                keys::unit(&source, UnitKind::Links, page.key.as_str())
+                    .as_str()
+                    .to_owned()
+            })
+            .collect();
         let stale: Vec<_> = store
             .unit_metas(&source)?
             .into_iter()
-            .filter(|meta| !meta.deleted && !produced.contains_key(meta.key.as_str()))
+            .filter(|meta| {
+                !meta.deleted
+                    && !produced.contains(meta.key.as_str())
+                    && (complete || considered.contains(meta.key.as_str()))
+            })
             .map(|meta| meta.key)
             .collect();
 
         for batch in units.chunks(BATCH) {
             let outcome = self.apply(batch)?;
-            if outcome.changed {
-                report.units_applied += batch.len();
-            }
+            report.units_applied += outcome.units_changed;
             report.nodes_upserted += outcome.delta.nodes_upserted.len();
             report.edges_upserted += outcome.delta.edges_upserted.len();
         }

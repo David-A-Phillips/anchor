@@ -120,9 +120,9 @@ questions; on a 131-question sample, a reader model answered 85% correctly from 
 from the best LlamaIndex configuration, using less than half the tokens. That corpus is
 synthetic and favours the questions Anchor targets. On the standard multi-hop benchmarks other
 graph-RAG systems report (MuSiQue, 2WikiMultiHopQA, HotpotQA: plain Wikipedia passages, no code
-or org chart), Anchor without a model links pages by the titles they name and averages 68.3
-recall@5, against 61.1 for BM25 and 87.1 for HippoRAG 2 with a 70B model; it is strongest on
-2WikiMultiHopQA (85.6) and level with BM25 on MuSiQue. Method, numbers and caveats: [docs/benchmarks.md](docs/benchmarks.md).
+or org chart), Anchor without a model links pages by the titles they name and averages 72.1
+recall@5, against 61.1 for BM25, 73.6 for HippoRAG and 87.1 for HippoRAG 2, both with a 70B model;
+it matches HippoRAG 2 on 2WikiMultiHopQA (91.0) and is weakest on MuSiQue (47.8). Method, numbers and caveats: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Status
 

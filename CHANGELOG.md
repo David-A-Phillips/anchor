@@ -41,12 +41,14 @@
   `anchor mcp install`.
 - `AGENTS.md` for coding agents working on this repository.
 - **Wiki pages are linked by the titles they name**, without a model, after every full scan
-  (`[graph] title_links`, on by default). On 2WikiMultiHopQA this lifts recall@5 from 66.7 to
-  85.6.
+  (`[graph] title_links`, on by default), and kept current by the watcher as pages change. Links
+  through titles that many pages name are weighted down. On 2WikiMultiHopQA, with the ranking
+  below, recall@5 goes from 66.7 to 91.0.
 - **Open questions are ranked by fused search and their links**: node-name, full-text and (with
   a neural embedding model) vector results are merged by reciprocal rank fusion, and the best
-  candidates pass relevance along their links. Questions seeking an owner, dependency or other
-  answer kind are ranked as before.
+  candidates pass relevance along their links; a node name counts only when the question contains
+  it whole. Questions seeking an owner, dependency or other answer kind are ranked as before.
+  Average recall@5 on MuSiQue, 2WikiMultiHopQA and HotpotQA: 59.4 to 72.1 (BM25 61.1).
 - **`anchor enrich --links-only`**: the model only names what each text refers to, about a quarter
   of the output of a full pass. Names the model gives now also link to wiki pages, and up to
   eight calls run at once.
@@ -68,6 +70,8 @@
   Anchor-managed server starts with `[ollama] num_parallel` (4) and `context_tokens` (8,192).
   Before, eight parallel requests on a server defaulting to 32,768 tokens reserved more than a
   24 GB GPU holds.
+- **Re-ingesting reports only what changed**: unchanged files no longer count as applied units,
+  and the title-link pass is skipped when no page changed.
 - **Interrupted enrichment keeps its work**: results are saved every 128 nodes, and the next run
   skips them.
 - **The install script works**: it refused its own default repository, and could not find a

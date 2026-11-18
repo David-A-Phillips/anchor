@@ -41,6 +41,11 @@ request reviews) into `./corpus` for scale testing.
 
 ## Measured retrieval quality
 
+`tests/multihop.rs` checks two-hop retrieval over generated prose (the second page is reachable
+only through a title link), and the weekly `.github/workflows/multihop.yml` reruns the
+MuSiQue, 2WikiMultiHopQA and HotpotQA benchmarks and fails below set scores
+(`scripts/bench/multihop.py run ... --require DATASET:METRIC=MIN`).
+
 `cargo test --all-features --test e2e -- --nocapture` scores 166 generated questions with known
 answers by node key. Current results: ownership recall 1.00, answer precision 0.91 and
 top-answer accuracy 0.99, with stale reference-only claims never winning; multi-hop relationship questions recall 1.00 and
@@ -59,8 +64,9 @@ rather than as a separate comment node).
   beyond the answer.
 - Two graph nodes that already exist are not merged retroactively when a later source reveals
   they are the same entity; `GraphStore::rebuild` re-materialises the graph and heals this.
-- Links between wiki pages by title (`graph.title_links`) are rebuilt after a full scan
-  (`anchor ingest`, the daemon's start), not when the watcher applies a single changed file.
+- A title link to a deleted wiki page disappears with the page. If a page at the same path later
+  returns under another title, the old link reattaches until the next full scan
+  (`anchor ingest`) recomputes the links.
 - Wiki prose is linked to entities it mentions, but ownership stated only in prose is not turned
   into an ownership claim.
 - Managed Ollama installation supports Linux only.

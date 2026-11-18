@@ -150,6 +150,9 @@ pub struct Engine {
     backlog: Arc<Backlog>,
     events: broadcast::Sender<EngineEvent>,
     pending_chunks: Mutex<Vec<ChunkId>>,
+    /// Nodes whose node row or text changed since the last title-link pass (wiki pages among
+    /// them are relinked after a watcher rescan).
+    touched_nodes: Mutex<BTreeSet<crate::base::NodeId>>,
     latencies: Mutex<Vec<u64>>,
     ownership: Mutex<HashMap<SourceId, Arc<OwnershipRules>>>,
     manifest: Mutex<HashMap<(SourceId, String), (u64, i128)>>,
@@ -250,6 +253,7 @@ impl Engine {
             backlog,
             events,
             pending_chunks: Mutex::new(Vec::new()),
+            touched_nodes: Mutex::new(BTreeSet::new()),
             latencies: Mutex::new(Vec::new()),
             ownership: Mutex::new(HashMap::new()),
             manifest: Mutex::new(HashMap::new()),
@@ -522,7 +526,19 @@ impl Engine {
         if !outcome.chunks_upserted.is_empty() {
             self.pending_chunks.lock().extend(&outcome.chunks_upserted);
         }
+        if self.config.graph.title_links {
+            let mut touched = self.touched_nodes.lock();
+            touched.extend(outcome.delta.nodes_upserted.iter().map(|node| node.id));
+            touched.extend(&outcome.chunk_nodes);
+        }
         Ok(())
+    }
+
+    /// Takes the nodes touched since the last call (see [`Self::relink_titles`]).
+    pub(crate) fn take_touched_pages(&self) -> Vec<crate::base::NodeId> {
+        std::mem::take(&mut *self.touched_nodes.lock())
+            .into_iter()
+            .collect()
     }
 
     /// The write path for locally produced units.
@@ -652,9 +668,20 @@ impl Engine {
             .into_iter()
             .map(|source| self.scan_source(&source.id))
             .collect::<Result<Vec<_>>>()?;
-        // Page-to-page links need every page's title, so they follow a full scan.
+        // Page-to-page links need every page's title, so they follow a full scan; when no node
+        // or text changed and the links exist, they are already current.
         if wiki && self.config.graph.title_links {
-            reports.push(self.link_titles()?);
+            let current = self.touched_nodes.lock().is_empty()
+                && self
+                    .store
+                    .unit_metas(&SourceId::new(
+                        crate::engine::title_links::TITLE_LINK_SOURCE,
+                    ))?
+                    .iter()
+                    .any(|meta| !meta.deleted);
+            if !current {
+                reports.push(self.link_titles()?);
+            }
         }
         Ok(reports)
     }
@@ -768,7 +795,7 @@ impl Engine {
             return Ok(());
         }
         let outcome = self.apply(units)?;
-        report.units_applied += units.len();
+        report.units_applied += outcome.units_changed;
         report.nodes_upserted += outcome.delta.nodes_upserted.len();
         report.edges_upserted += outcome.delta.edges_upserted.len();
         units.clear();
@@ -1168,6 +1195,12 @@ impl Engine {
         let source = self.source(&id)?;
         if source.kind != SourceKind::Repo {
             self.scan_source(&id)?;
+            if source.kind == SourceKind::Wiki && self.config.graph.title_links {
+                let touched = self.take_touched_pages();
+                if !touched.is_empty() {
+                    self.relink_titles(&touched)?;
+                }
+            }
             return Ok(true);
         }
         if rel.starts_with(".git/") || rel.is_empty() {
