@@ -11,7 +11,8 @@ workflow is validated with `actionlint` only); do a dry run first.
    (`dist-*`, `repos-dry-run`, `release-dry-run`); it publishes nothing. Download `repos-dry-run`,
    serve it (`python3 -m http.server`) and try it as in `docs/install.md`.
 2. **Bump the version** in `Cargo.toml` (`version = "X.Y.Z"`), then `cargo check` to refresh
-   `Cargo.lock`. Add an entry at the top of `packaging/deb/changelog` (same Debian format,
+   `Cargo.lock`. Move the notes under a heading for the new version in `CHANGELOG.md` (breaking
+   changes first). Add an entry at the top of `packaging/deb/changelog` (same Debian format,
    version `X.Y.Z-1`). Optional: bump `packaging/{aur,scoop,winget,nix}` (they are templates that
    packagers update from the release).
 3. `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`, and

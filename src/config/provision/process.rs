@@ -22,12 +22,29 @@ pub struct LaunchSpec {
     pub home_dir: PathBuf,
     /// File receiving the server's stdout and stderr (appended).
     pub log_file: PathBuf,
+    /// Requests run at once (`OLLAMA_NUM_PARALLEL`); 0 leaves it to the server.
+    pub num_parallel: u32,
+    /// Default context window in tokens (`OLLAMA_CONTEXT_LENGTH`); 0 leaves it to the server.
+    pub context_tokens: u32,
 }
 
 impl LaunchSpec {
     /// Value of `OLLAMA_HOST`.
     pub fn ollama_host(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// Memory bounds passed to the server, skipping any the environment already sets (an
+    /// operator's own `OLLAMA_NUM_PARALLEL` or `OLLAMA_CONTEXT_LENGTH` wins).
+    pub fn limits(&self, inherited: impl Fn(&str) -> bool) -> Vec<(&'static str, String)> {
+        [
+            ("OLLAMA_NUM_PARALLEL", self.num_parallel),
+            ("OLLAMA_CONTEXT_LENGTH", self.context_tokens),
+        ]
+        .into_iter()
+        .filter(|(name, value)| *value > 0 && !inherited(name))
+        .map(|(name, value)| (name, value.to_string()))
+        .collect()
     }
 }
 
@@ -92,6 +109,7 @@ impl ProcessControl for SystemProcesses {
             .env("OLLAMA_HOST", spec.ollama_host())
             .env("OLLAMA_MODELS", &spec.models_dir)
             .env("HOME", &spec.home_dir)
+            .envs(spec.limits(|name| std::env::var_os(name).is_some()))
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)
@@ -192,5 +210,36 @@ mod tests {
         );
         assert!(processes.signal(0, StopSignal::Kill).is_err());
         assert!(processes.signal(1, StopSignal::Kill).is_err());
+    }
+
+    #[test]
+    fn the_server_gets_bounded_memory_unless_the_operator_set_it() {
+        let spec = LaunchSpec {
+            binary: PathBuf::from("ollama"),
+            host: "127.0.0.1".to_owned(),
+            port: 11434,
+            models_dir: PathBuf::from("m"),
+            home_dir: PathBuf::from("h"),
+            log_file: PathBuf::from("l"),
+            num_parallel: 4,
+            context_tokens: 8192,
+        };
+        assert_eq!(
+            spec.limits(|_| false),
+            vec![
+                ("OLLAMA_NUM_PARALLEL", "4".to_owned()),
+                ("OLLAMA_CONTEXT_LENGTH", "8192".to_owned())
+            ]
+        );
+        assert_eq!(
+            spec.limits(|name| name == "OLLAMA_CONTEXT_LENGTH"),
+            vec![("OLLAMA_NUM_PARALLEL", "4".to_owned())]
+        );
+        let unset = LaunchSpec {
+            num_parallel: 0,
+            context_tokens: 0,
+            ..spec
+        };
+        assert!(unset.limits(|_| false).is_empty());
     }
 }

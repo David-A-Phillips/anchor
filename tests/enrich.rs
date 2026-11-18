@@ -11,7 +11,7 @@ use anchor::base::{
 };
 use anchor::config::{AnchorConfig, SourceConfig};
 use anchor::engine::Engine;
-use anchor::engine::enrich::{ENRICHMENT_SOURCE, EnrichReport};
+use anchor::engine::enrich::{ENRICHMENT_SOURCE, EnrichMode, EnrichReport};
 use anchor::engine::router::{
     ProviderKind, RoutingConfig, ScriptedModel, ScriptedReply, TieredRouter,
 };
@@ -219,5 +219,162 @@ async fn without_a_system1_model_enrichment_does_nothing() {
     assert_eq!(
         engine.enrich_with(&bare, 10).await.unwrap(),
         EnrichReport::default()
+    );
+}
+
+#[tokio::test]
+async fn named_pages_become_links_between_pages_but_a_page_does_not_link_to_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = world(dir.path());
+    write(
+        &dir.path().join("wiki/gateway.md"),
+        "---\ntitle: Payment gateway\n---\n# Payment gateway\n\nWhere charges enter.\n",
+    );
+    engine.scan_all().unwrap();
+    let model = scripted();
+    model.always(ScriptedReply::Text(
+        r#"{"summary": "About payments.", "tags": ["payments"],
+            "entities": ["Retry runbook", "payment gateway"]}"#
+            .to_owned(),
+    ));
+    engine.enrich_with(&router(&model), 10).await.unwrap();
+
+    let pages = engine
+        .store()
+        .nodes_by_kind(NodeKind::WikiPage, 10, 0)
+        .unwrap();
+    assert_eq!(pages.len(), 2);
+    for page in &pages {
+        let other = pages.iter().find(|p| p.id != page.id).unwrap();
+        let mentions: Vec<_> = engine
+            .store()
+            .edges_of(page.id, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == EdgeKind::Mentions && e.from == page.id)
+            .collect();
+        assert!(
+            mentions.iter().any(|e| e.to == other.id),
+            "{} should mention {}: {mentions:?}",
+            page.name,
+            other.name
+        );
+        assert!(
+            mentions.iter().all(|e| e.to != page.id),
+            "{} mentions itself",
+            page.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn links_only_mode_links_without_summaries_and_a_full_pass_redoes_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = world(dir.path());
+    let model = scripted();
+    model.always(ScriptedReply::Text(r#"{"entities": ["PAY-2"]}"#.to_owned()));
+
+    let report = engine
+        .enrich_with_mode(&router(&model), 10, EnrichMode::Links)
+        .await
+        .unwrap();
+    assert_eq!((report.enriched, report.failed), (3, 0));
+    let page = page(&engine);
+    assert!(!page.attrs.contains_key("summary"), "{:?}", page.attrs);
+    assert!(
+        !engine
+            .store()
+            .chunks_of(page.id)
+            .unwrap()
+            .iter()
+            .any(|chunk| chunk.source.as_str() == ENRICHMENT_SOURCE),
+        "no description chunk in links-only mode"
+    );
+    assert!(
+        engine
+            .store()
+            .edges_of(page.id, 100)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == EdgeKind::Mentions && e.from == page.id)
+    );
+    // The prompt asked for entities only.
+    let prompt = format!("{:?}", model.requests()[0]);
+    assert!(!prompt.contains("summary"), "{prompt}");
+
+    // Same mode again: nothing to do. A full pass is a different request, so it runs.
+    let again = engine
+        .enrich_with_mode(&router(&model), 10, EnrichMode::Links)
+        .await
+        .unwrap();
+    assert_eq!(again.unchanged, 3);
+    model.always(ScriptedReply::Text(GOOD.to_owned()));
+    let full = engine.enrich_with(&router(&model), 10).await.unwrap();
+    assert_eq!(full.enriched, 3);
+    assert_eq!(
+        page_named(&engine, "Retry runbook")
+            .attrs
+            .get("summary")
+            .and_then(|v| v.as_str()),
+        Some("How charges are retried.")
+    );
+}
+
+fn page_named(engine: &Engine, name: &str) -> anchor::engine::store::NodeRecord {
+    engine
+        .store()
+        .nodes_by_kind(NodeKind::WikiPage, 1000, 0)
+        .unwrap()
+        .into_iter()
+        .find(|page| page.name == name)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_interrupted_run_keeps_the_batches_it_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..130 {
+        write(
+            &dir.path().join(format!("wiki/p{i:03}.md")),
+            &format!("# Page {i}\n\nText of page {i}.\n"),
+        );
+    }
+    let mut config = AnchorConfig {
+        data_dir: Some(dir.path().join("data")),
+        ..AnchorConfig::default()
+    };
+    config.models.system1.provider = ProviderKind::Disabled;
+    config.sources.push(SourceConfig::new(
+        "wiki",
+        SourceKind::Wiki,
+        dir.path().join("wiki").to_string_lossy(),
+    ));
+    let engine = Engine::open(config).unwrap();
+    engine.scan_all().unwrap();
+
+    // The first 128 calls (one batch) answer at once; the last two never do.
+    let model = scripted();
+    for _ in 0..128 {
+        model.push_text(GOOD);
+    }
+    for _ in 0..2 {
+        model.push_delayed(
+            std::time::Duration::from_secs(3600),
+            ScriptedReply::Text(GOOD.to_owned()),
+        );
+    }
+    let cut = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.enrich_with(&router(&model), 1000),
+    )
+    .await;
+    assert!(cut.is_err(), "the run was interrupted");
+
+    model.always(ScriptedReply::Text(GOOD.to_owned()));
+    let resumed = engine.enrich_with(&router(&model), 1000).await.unwrap();
+    assert_eq!(
+        (resumed.unchanged, resumed.enriched),
+        (128, 2),
+        "the finished batch was kept"
     );
 }

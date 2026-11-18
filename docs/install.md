@@ -1,9 +1,6 @@
 # Installing and sharing Anchor
 
-Pick the first channel that fits your system. Every command below uses the placeholder
-repository `David-A-Phillips/anchor`; replace `OWNER` with the real GitHub account (and, for the apt and dnf
-repositories, use the real base URL: `https://David-A-Phillips.github.io/anchor` is the default GitHub Pages
-address). The OS package is called **`anchor-context`** because Debian and Fedora already have
+Pick the first channel that fits your system. The OS package is called **`anchor-context`** because Debian and Fedora already have
 unrelated packages called `anchor`; the command it installs is still `anchor`.
 
 | Channel | Platforms | Status |
@@ -135,7 +132,7 @@ The script detects your OS and CPU, downloads `anchor-<version>-<target>.tar.gz`
 
 | Variable | Meaning |
 |----------|---------|
-| `ANCHOR_REPO` | GitHub `owner/name` (default is the placeholder `David-A-Phillips/anchor`) |
+| `ANCHOR_REPO` | GitHub `owner/name` (default `David-A-Phillips/anchor`; set it for a fork or mirror) |
 | `ANCHOR_VERSION` | Version without the `v` (default: latest release) |
 | `ANCHOR_INSTALL_DIR` | Install directory (default `~/.local/bin`) |
 | `ANCHOR_BASE_URL` | Directory URL holding the archive and checksum, for a mirror or air-gapped host; requires `ANCHOR_VERSION` |
@@ -193,7 +190,7 @@ cargo install --path . --locked      # or: cargo build --release
 ```
 
 `cargo install anchor` (from crates.io) only works once the crate is published, which needs
-`publish = true`, a free crate name and a license (see `RELEASING.md`). **Upgrade:** rerun the
+`publish = true` and a free crate name (see `RELEASING.md`). **Upgrade:** rerun the
 command (`--force` for `cargo install`). **Uninstall:** `cargo uninstall anchor`.
 
 ## 7. Windows

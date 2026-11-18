@@ -36,7 +36,8 @@ pub struct SyncConfig {
     pub default_depth: Depth,
     /// Seconds between sync rounds when no change notification arrives.
     pub interval_secs: u64,
-    /// Address the sync server listens on (server mode).
+    /// Address the sync server listens on (server mode). The default, `127.0.0.1:7891`, accepts
+    /// connections from this machine only; set `0.0.0.0:7891` to serve other machines.
     pub listen: String,
 }
 
@@ -50,7 +51,7 @@ impl Default for SyncConfig {
             subscribe: Vec::new(),
             default_depth: Depth::Full,
             interval_secs: 30,
-            listen: "0.0.0.0:7891".to_owned(),
+            listen: "127.0.0.1:7891".to_owned(),
         }
     }
 }

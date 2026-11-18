@@ -203,12 +203,12 @@ fn split_lines(target: &str) -> (&str, Option<(u32, u32)>) {
     (target, None)
 }
 
-struct Located {
-    source: SourceId,
-    root: Option<PathBuf>,
-    path: String,
-    lines: Option<(u32, u32)>,
-    node: Option<NodeId>,
+pub(crate) struct Located {
+    pub(crate) source: SourceId,
+    pub(crate) root: Option<PathBuf>,
+    pub(crate) path: String,
+    pub(crate) lines: Option<(u32, u32)>,
+    pub(crate) node: Option<NodeId>,
 }
 
 impl Engine {
@@ -223,7 +223,7 @@ impl Engine {
 
     /// Finds what `target` names: a path on disk, a path relative to a repository source
     /// (optionally `source:path`), or a symbol.
-    fn locate_target(&self, target: &str) -> Result<Located> {
+    pub(crate) fn locate_target(&self, target: &str) -> Result<Located> {
         let store = self.store();
         let (text, lines) = split_lines(target.trim());
         let roots = self.repo_roots();
@@ -698,6 +698,19 @@ impl Engine {
             .root
             .as_deref()
             .filter(|root| history::is_work_tree(root));
+        // A line range past the end of the file is a mistake in the question, not a gap.
+        if let (Some(root), Some((start, _))) = (located.root.as_deref(), located.lines)
+            && let Ok(text) = std::fs::read_to_string(root.join(&located.path))
+        {
+            let count = text.lines().count() as u32;
+            if start > count {
+                return Err(Error::invalid(format!(
+                    "{} has {count} line{}; line {start} is past the end",
+                    located.path,
+                    if count == 1 { "" } else { "s" }
+                )));
+            }
+        }
         let mut repo_names = vec![keys::slugify(located.source.as_str())];
         if let Some(root) = git_root {
             repo_names = history::repo_names(root, &located.source);
@@ -732,10 +745,13 @@ impl Engine {
             }
         } else {
             method = "history";
-            gaps.push(
-                "the repository's working tree is not on this machine (or is not a git repository): using the ingested history, which is per file, not per line"
-                    .into(),
-            );
+            gaps.push(match located.root.as_deref() {
+                Some(root) => format!(
+                    "{} is not a git repository, so lines cannot be blamed: using the ingested history, which is per file, not per line",
+                    root.display()
+                ),
+                None => "the repository's working tree is not on this machine: using the ingested history, which is per file, not per line".to_owned(),
+            });
             if let Some(file) = located.node {
                 for info in self.commits_from_graph(file)? {
                     selected.push((info, 0));

@@ -334,6 +334,37 @@ async fn paths_are_found_between_connected_nodes_and_404_otherwise() {
 }
 
 #[tokio::test]
+async fn impact_and_hotspots_are_served_as_json() {
+    let f = fixture();
+    let impact = get(&f.app, "/api/impact?targets=charge,no-such-thing").await;
+    assert_eq!(
+        impact.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&impact.body)
+    );
+    let body = impact.json();
+    assert_eq!(body["targets"].as_array().unwrap().len(), 2);
+    assert!(body["dependents"].is_array());
+    assert!(body["summary"].is_object());
+
+    let nothing = get(&f.app, "/api/impact?targets=no-such-thing").await;
+    assert_eq!(nothing.status, StatusCode::NOT_FOUND);
+    let missing = get(&f.app, "/api/impact").await;
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+    let bad_kind = get(&f.app, "/api/impact?targets=charge&kinds=planet").await;
+    assert_eq!(bad_kind.status, StatusCode::BAD_REQUEST);
+
+    let hotspots = get(&f.app, "/api/hotspots?kind=symbol&limit=3").await;
+    assert_eq!(hotspots.status, StatusCode::OK);
+    let body = hotspots.json();
+    assert_eq!(body["kind"], "symbol");
+    assert!(body["hotspots"].as_array().unwrap().len() <= 3);
+    let bad = get(&f.app, "/api/hotspots?kind=planet").await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn the_hierarchy_lists_the_organisational_nodes() {
     let f = fixture();
     let reply = get(&f.app, "/api/graph/hierarchy").await;

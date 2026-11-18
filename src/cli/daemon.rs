@@ -105,6 +105,9 @@ pub(crate) async fn embed_and_enrich(engine: &Engine) {
     if let Err(err) = engine.enrich(ENRICH_BATCH).await {
         tracing::warn!("enrichment failed: {err}");
     }
+    if let Err(err) = engine.save_graph_snapshot(false) {
+        tracing::warn!("saving the graph snapshot failed: {err}");
+    }
 }
 
 /// Runs `work` after every [`EngineEvent::GraphChanged`] (waiting `debounce` first), until the

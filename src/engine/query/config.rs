@@ -31,6 +31,9 @@ pub struct QueryConfig {
     pub model_answers: bool,
     /// Behaviour when a question touches a shallow source.
     pub on_shallow: ShallowPolicy,
+    /// Time budget of graph retrieval for one question, in milliseconds. Traversal stops when
+    /// it runs out and the answer is marked `truncated`.
+    pub timeout_ms: u64,
 }
 
 impl Default for QueryConfig {
@@ -41,6 +44,7 @@ impl Default for QueryConfig {
             confidence_threshold: 0.55,
             model_answers: false,
             on_shallow: ShallowPolicy::Background,
+            timeout_ms: 10_000,
         }
     }
 }

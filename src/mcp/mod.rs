@@ -13,13 +13,22 @@
 //! * `path`: the most trustworthy path between two entities.
 //! * `why`: the trail from a file, line range or symbol to the commits, pull requests, review
 //!   decisions, tickets and pages that explain it.
+//! * `impact`: everything that depends on any of several files, symbols or entities (a whole
+//!   change), and the owners to notify.
+//! * `hotspots`: the most depended-on entities, who owns them, and which have no owner or a
+//!   single-person owner.
 //! * `deepen`: ingest a shallow source more deeply, then ask again.
 //! * `ingest`: rescan the sources when no daemon is keeping the graph current.
 //! * `status`: what is indexed and at which depth.
+//!
+//! Every read-only tool runs under a time limit (three times `[query] timeout_ms`, at least
+//! three seconds), and graph searches stop at their time and visit budgets: a result cut short
+//! carries `"truncated": true` instead of keeping the agent waiting.
 
 pub mod install;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -28,6 +37,7 @@ use crate::base::{Error, NodeId, NodeKey, NodeKind, Result, SourceId};
 use crate::config::Depth;
 use crate::engine::Engine;
 use crate::engine::graph::{Limits, Pathfinder, TraversalProfile};
+use crate::engine::impact::{HotspotOptions, ImpactOptions};
 use crate::engine::query::{QueryEngine, QueryRequest, QueryResponse};
 use crate::engine::store::NodeRecord;
 
@@ -49,7 +59,9 @@ decision was made, or what depends on what; every piece of evidence carries a tr
 If a response lists `shallow` sources, the answer rests on partially ingested data: call `deepen` \
 for that source and ask again. Call `status` once per session: if `daemon_running` is false, \
 call `ingest` before relying on answers and again after large changes. Use `why` on code \
-whose purpose is unclear before changing it.";
+whose purpose is unclear before changing it, and `impact` with the files you are changing to see \
+what depends on them and whom to tell. `hotspots` shows the most depended-on services and their \
+ownership risks. A result with `truncated: true` stopped at a time or size budget: narrow it.";
 
 /// The MCP server.
 #[derive(Clone)]
@@ -133,6 +145,34 @@ pub fn tools() -> Vec<Value> {
                 "target": { "type": "string", "description": "`path`, `path:line`, `path:start-end` (path absolute, or relative to a repository; prefix `source:` when the same path exists in several), or a symbol name." },
             }),
             &["target"],
+        ),
+        tool(
+            "impact",
+            "What could break if these change: everything that depends, directly or through \
+             calls, references, imports, service dependencies and API consumption, on any of the \
+             given files, symbols or entities, nearest first with the chain that links it, plus \
+             the teams or people who own what is affected. Pass every file of a change at once. \
+             A team or person target stands for everything it owns; a component, domain or \
+             portfolio for the services it contains.",
+            json!({
+                "targets": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 200, "description": "Files (`path`, `source:path`), symbols, entity keys (`service:payments-api`, `team:payments`) or names of services, APIs, components, teams or people." },
+                "kinds": { "type": "array", "items": { "type": "string" }, "description": "Only report dependents of these kinds, e.g. [\"service\", \"file\"]." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum dependents listed (default 50)." },
+            }),
+            &["targets"],
+        ),
+        tool(
+            "hotspots",
+            "The most depended-on entities (services by default) with their dependents count and \
+             owner and, when git history is ingested, who changed them; flagging risks: \
+             `no_owner`, `single_person_owner`, `reference_only_owner`, `single_committer`; and \
+             the teams and people who own the most.",
+            json!({
+                "kind": { "type": "string", "description": "Granularity: `service` (default), `component`, `api_spec`, `api_endpoint`, `file` or `symbol`." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Entries returned (default 20)." },
+                "min_dependents": { "type": "integer", "minimum": 1, "description": "Only entities with at least this many dependents (default 1)." },
+            }),
+            &[],
         ),
         tool(
             "deepen",
@@ -241,8 +281,31 @@ pub fn render_answer(response: &QueryResponse) -> Value {
         "conflicts": conflicts,
         "shallow": response.shallow,
         "gaps": response.gaps,
+        "truncated": response.truncated,
     })
 }
+
+fn string_list(args: &Map<String, Value>, name: &str) -> Result<Vec<String>> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(|text| text.trim().to_owned())
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| Error::invalid(format!("`{name}` must be a list of strings")))
+            })
+            .collect(),
+        Some(Value::String(one)) => Ok(vec![one.trim().to_owned()]),
+        Some(_) => Err(Error::invalid(format!(
+            "`{name}` must be a list of strings"
+        ))),
+    }
+}
+
+/// Tools that may legitimately run for minutes (they ingest), exempt from the time limit.
+const LONG_RUNNING: &[&str] = &["deepen", "ingest"];
 
 impl McpServer {
     /// A server over an open engine.
@@ -400,23 +463,34 @@ impl McpServer {
         self.blocking(move |server| {
             let from = server.resolve(&from)?;
             let to = server.resolve(&to)?;
+            // Another process (the daemon) may have changed the graph since this one loaded it.
+            server.engine.store().catch_up()?;
             let config = server.engine.config().graph.clone();
-            let found = {
+            let millis = server.engine.config().query.timeout_ms;
+            let deadline = (millis > 0).then(|| Instant::now() + Duration::from_millis(millis));
+            let (found, truncated) = {
                 let graph = server.engine.graph();
                 let graph = graph.read();
-                Pathfinder::new(&graph, &config).shortest_path(
+                let finder = Pathfinder::new(&graph, &config);
+                let found = finder.shortest_path(
                     from.id,
                     to.id,
                     &TraversalProfile::general(),
-                    Limits::from(&config),
-                )
+                    Limits::from(&config).until(deadline),
+                );
+                (found, finder.truncated())
             };
             let Some(found) = found else {
                 return Ok(json!({
                     "found": false,
                     "from": brief(&from),
                     "to": brief(&to),
-                    "detail": "no path within the configured hop and cost limits",
+                    "truncated": truncated,
+                    "detail": if truncated {
+                        "the search stopped at its time or visit budget before finding a path"
+                    } else {
+                        "no path within the configured hop and cost limits"
+                    },
                 }));
             };
             let nodes: std::collections::HashMap<NodeId, NodeRecord> = server
@@ -452,6 +526,7 @@ impl McpServer {
                 "steps": steps,
                 "reference_only_elements": found.cost.reference_elements,
                 "cost": found.cost.weighted,
+                "truncated": truncated,
             }))
         })
         .await
@@ -563,13 +638,79 @@ impl McpServer {
                     }));
                 }
             }
-            Ok(json!({ "sources": sources, "entities": stats.nodes, "store": stats }))
+            Ok(json!({
+                "sources": sources,
+                "entities": stats.nodes,
+                "store": stats,
+                "graph_loaded": engine.graph_open(),
+            }))
         })
         .await
     }
 
+    /// The time limit of read-only tool calls.
+    pub fn tool_timeout(&self) -> Duration {
+        Duration::from_millis(
+            self.engine
+                .config()
+                .query
+                .timeout_ms
+                .saturating_mul(3)
+                .max(3_000),
+        )
+    }
+
     /// Runs one tool. `Err` means the call failed; the caller reports it as a tool error.
+    /// Read-only tools fail with an explanation instead of running past [`Self::tool_timeout`].
     pub async fn call_tool(&self, name: &str, args: &Map<String, Value>) -> Result<Value> {
+        if LONG_RUNNING.contains(&name) {
+            return self.run_tool(name, args).await;
+        }
+        let limit = self.tool_timeout();
+        match tokio::time::timeout(limit, self.run_tool(name, args)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::other(format!(
+                "`{name}` did not finish within {} s; name the entity more precisely or ask about fewer targets",
+                limit.as_secs()
+            ))),
+        }
+    }
+
+    async fn impact(&self, args: &Map<String, Value>) -> Result<Value> {
+        let targets = string_list(args, "targets")?;
+        if targets.is_empty() {
+            return Err(Error::invalid("missing argument `targets`"));
+        }
+        let options = ImpactOptions {
+            limit: usize_arg(args, "limit").unwrap_or(50).clamp(1, 500),
+            kinds: string_list(args, "kinds")?
+                .iter()
+                .map(|kind| kind.parse::<NodeKind>())
+                .collect::<Result<_>>()?,
+            ..ImpactOptions::default()
+        };
+        let report = self
+            .blocking(move |server| server.engine.impact(&targets, &options))
+            .await?;
+        Ok(serde_json::to_value(report)?)
+    }
+
+    async fn hotspots(&self, args: &Map<String, Value>) -> Result<Value> {
+        let options = HotspotOptions {
+            kind: match args.get("kind").and_then(Value::as_str) {
+                Some(kind) if !kind.trim().is_empty() => kind.trim().parse::<NodeKind>()?,
+                _ => NodeKind::Service,
+            },
+            limit: usize_arg(args, "limit").unwrap_or(20).clamp(1, 200),
+            min_dependents: usize_arg(args, "min_dependents").unwrap_or(1).max(1),
+        };
+        let report = self
+            .blocking(move |server| server.engine.hotspots(&options))
+            .await?;
+        Ok(serde_json::to_value(report)?)
+    }
+
+    async fn run_tool(&self, name: &str, args: &Map<String, Value>) -> Result<Value> {
         match name {
             "ask" => self.ask(args).await,
             "search" => self.search(args).await,
@@ -582,6 +723,8 @@ impl McpServer {
                     .await?;
                 Ok(serde_json::to_value(report)?)
             }
+            "impact" => self.impact(args).await,
+            "hotspots" => self.hotspots(args).await,
             "deepen" => self.deepen(args).await,
             "ingest" => self.ingest(args).await,
             "status" => self.status().await,

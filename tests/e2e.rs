@@ -175,7 +175,7 @@ struct Thresholds {
 
 const THRESHOLDS: Thresholds = Thresholds {
     ownership_recall: 0.95,
-    ownership_precision: 0.15,
+    ownership_precision: 0.85,
     ownership_accuracy: 0.90,
     justification_recall: 0.30,
     justification_precision: 0.03,

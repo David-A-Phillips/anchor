@@ -245,11 +245,18 @@ fn every_source_ingests_cleanly_into_one_store() {
             "payments-api",
             "portal",
             "wiki",
-            "jira"
+            "jira",
+            "anchor-title-links"
         ],
-        "scan order: org model first, then code, then the rest"
+        "scan order: org model first, then code, then the rest, then links between pages"
     );
-    assert!(p.reports.iter().all(|r| r.units_applied > 0));
+    // Every configured source contributed; the derived title-link pass may find nothing.
+    assert!(
+        p.reports
+            .iter()
+            .filter(|r| r.source != "anchor-title-links")
+            .all(|r| r.units_applied > 0)
+    );
 }
 
 #[test]
@@ -565,6 +572,76 @@ fn the_in_memory_graph_equals_the_store_after_ingestion_edits_and_removals() {
     // Applying the same state twice is a no-op for the graph too.
     p.engine.scan_all().unwrap();
     assert_graph_matches_store(&p.engine);
+}
+
+#[test]
+fn the_engine_starts_from_a_saved_graph_and_replays_what_changed_since() {
+    let p = ingest_pipeline();
+    let config = p.engine.config().clone();
+    let snapshot = p.engine.paths().graph_snapshot();
+
+    // The first open (of an empty database) saved a snapshot; the ingest since is replayed on
+    // top of it, and the result saved again.
+    assert!(snapshot.exists());
+    let first = Engine::open(config.clone()).unwrap();
+    assert!(first.graph_open().from_snapshot);
+    assert!(first.graph_open().replayed > 0);
+    assert_graph_matches_store(&first);
+    drop(first);
+
+    // With nothing changed since, the snapshot is used as is.
+    let second = Engine::open(config.clone()).unwrap();
+    assert_eq!(
+        (
+            second.graph_open().from_snapshot,
+            second.graph_open().replayed
+        ),
+        (true, 0)
+    );
+    assert_graph_matches_store(&second);
+
+    // Changes made by another engine (another process) after the snapshot are replayed.
+    write(
+        p._dir.path(),
+        "repos/payments-api/src/lib.rs",
+        &(lib_rs("payments-api") + "\npub fn replayed() {}\n"),
+    );
+    p.engine.scan_all().unwrap();
+    let third = Engine::open(config.clone()).unwrap();
+    assert!(third.graph_open().from_snapshot);
+    assert!(third.graph_open().replayed > 0);
+    assert_graph_matches_store(&third);
+
+    // A long-running engine (an MCP server) sees those writes too on its next consistent read.
+    write(
+        p._dir.path(),
+        "repos/payments-api/src/lib.rs",
+        &(lib_rs("payments-api") + "\npub fn later() {}\n"),
+    );
+    p.engine.scan_all().unwrap();
+    second.store().catch_up().unwrap();
+    assert_graph_matches_store(&second);
+
+    // A corrupt snapshot is ignored and replaced.
+    std::fs::write(&snapshot, b"garbage").unwrap();
+    let fourth = Engine::open(config).unwrap();
+    assert!(fourth.graph_open().reloaded);
+    assert!(!fourth.graph_open().from_snapshot);
+    assert_graph_matches_store(&fourth);
+}
+
+#[test]
+fn flushing_saves_the_graph_and_trims_the_delta_log() {
+    let p = ingest_pipeline();
+    assert!(p.engine.store().graph_log_len().unwrap() > 0);
+    p.engine.flush().unwrap();
+    assert!(p.engine.paths().graph_snapshot().exists());
+    // Nothing new to save.
+    assert!(!p.engine.save_graph_snapshot(true).unwrap());
+    let reopened = Engine::open(p.engine.config().clone()).unwrap();
+    assert!(reopened.graph_open().from_snapshot);
+    assert_eq!(reopened.graph_open().replayed, 0);
+    assert_graph_matches_store(&reopened);
 }
 
 // =============================================================================================

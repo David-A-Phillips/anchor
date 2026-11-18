@@ -357,10 +357,13 @@ pub struct AnchorConfig {
     /// Dashboard (`[web]`).
     pub web: WebConfig,
     /// Configured sources (`[[sources]]`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<SourceConfig>,
     /// GitHub repositories kept exported by the daemon (`[[github]]`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub github: Vec<GithubFetchConfig>,
     /// Confluence and Jira sites kept exported by the daemon (`[[atlassian]]`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub atlassian: Vec<AtlassianConfig>,
 }
 
@@ -416,6 +419,11 @@ impl AnchorPaths {
     /// The SQLite database.
     pub fn db(&self) -> PathBuf {
         self.root.join("anchor.db")
+    }
+
+    /// The saved in-memory graph (a cache of the database; safe to delete).
+    pub fn graph_snapshot(&self) -> PathBuf {
+        self.root.join("graph.snapshot")
     }
 
     /// Device identity keys.

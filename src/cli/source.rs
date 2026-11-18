@@ -67,7 +67,31 @@ pub fn infer_kind(location: &Path) -> SourceKind {
         })
         .unwrap_or_default();
     let has = |suffix: &str| names.iter().any(|name| name.ends_with(suffix));
-    if has(".comments.json") || (has(".html") && !has(".rs") && !has(".py") && !has(".go")) {
+    const CODE: &[&str] = &[
+        ".rs",
+        ".py",
+        ".go",
+        ".ts",
+        ".js",
+        ".java",
+        ".kt",
+        ".c",
+        ".h",
+        ".cpp",
+        ".cs",
+        ".rb",
+        ".php",
+        ".swift",
+        ".scala",
+        "cargo.toml",
+        "package.json",
+        "go.mod",
+        "pom.xml",
+    ];
+    let has_code = CODE.iter().any(|suffix| has(suffix));
+    let pages = has(".md") || has(".markdown") || has(".html") || has(".htm");
+    // A folder of pages with no version control and no code is an exported wiki.
+    if has(".comments.json") || (pages && !has_code) {
         SourceKind::Wiki
     } else {
         SourceKind::Repo
@@ -134,6 +158,11 @@ pub fn run(action: SourceAction, mut config: AnchorConfig, path: &Path) -> Resul
         SourceAction::List => {
             if config.sources.is_empty() {
                 out.push("No sources configured. Add one with `anchor source add <path>`.".into());
+            } else {
+                out.push(format!(
+                    "{:<24} {:<12} {:<16} {:<10} {}",
+                    "ID", "KIND", "TRUST", "DEPTH", "LOCATION"
+                ));
             }
             for source in &config.sources {
                 out.push(format!(
@@ -155,12 +184,18 @@ pub fn run(action: SourceAction, mut config: AnchorConfig, path: &Path) -> Resul
             depth,
             no_ingest,
         } => {
+            let inferred = kind.is_none() || trust.is_none();
             let source = new_source(&config, &location, id.as_deref(), kind, trust, depth)?;
             let id = source.id.clone();
             out.push(format!(
                 "Added `{id}` ({}, {}) at {}.",
                 source.kind, source.trust, source.location
             ));
+            if inferred {
+                out.push(format!(
+                    "  Kind and trust were inferred; to change them: `anchor source remove {id}`, then add it again with --kind (repo, wiki, jira, ...) and --trust (source_of_truth or reference_only)."
+                ));
+            }
             config.sources.push(source);
             config.save(path)?;
             if no_ingest {
@@ -170,8 +205,9 @@ pub fn run(action: SourceAction, mut config: AnchorConfig, path: &Path) -> Resul
                 let report = engine.scan_source(&id)?;
                 engine.flush()?;
                 out.push(format!(
-                    "Ingested {} files: {} nodes, {} edges in {} ms.",
+                    "Ingested {} file{}: {} nodes, {} edges in {} ms.",
                     report.files_seen,
+                    if report.files_seen == 1 { "" } else { "s" },
                     report.nodes_upserted,
                     report.edges_upserted,
                     report.duration_ms
@@ -246,6 +282,18 @@ mod tests {
         let plain = dir.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(infer_kind(&plain), SourceKind::Repo);
+        // Markdown pages without version control or code: an exported wiki.
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(
+            notes.join("runbook.md"),
+            "---\ntitle: Runbook\n---\n# Runbook\n",
+        )
+        .unwrap();
+        assert_eq!(infer_kind(&notes), SourceKind::Wiki);
+        // A README next to code is still a repository.
+        std::fs::write(notes.join("main.py"), "print(1)\n").unwrap();
+        assert_eq!(infer_kind(&notes), SourceKind::Repo);
     }
 
     #[test]
@@ -271,7 +319,8 @@ mod tests {
             added[0].contains("`payments-api` (repo, source_of_truth)"),
             "{added:?}"
         );
-        assert!(added[1].starts_with("Ingested"), "{added:?}");
+        assert!(added[1].contains("inferred"), "{added:?}");
+        assert!(added[2].starts_with("Ingested"), "{added:?}");
 
         let saved = AnchorConfig::load(&path).unwrap();
         assert_eq!(saved.sources.len(), 1);
@@ -281,7 +330,8 @@ mod tests {
         drop(engine);
 
         let listed = run(SourceAction::List, saved.clone(), &path).unwrap();
-        assert!(listed[0].starts_with("payments-api"));
+        assert!(listed[0].starts_with("ID"));
+        assert!(listed[1].starts_with("payments-api"));
 
         // The same location or id cannot be added twice.
         let again = new_source(&saved, &root, None, None, None, Depth::Full);

@@ -5,17 +5,18 @@
 //! the router decides) is only used to synthesise prose for complex or low-confidence questions.
 
 mod config;
+pub mod fusion;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::embed::VectorIndex;
 use super::graph::{
-    Direction, Goal, GraphConfig, Limits, Path, PathCost, Pathfinder, Seed, SharedGraph,
-    TraversalProfile,
+    ContextGraph, Direction, Goal, GraphConfig, Limits, Path, PathCost, Pathfinder, Seed,
+    SharedGraph, TraversalProfile,
 };
 use super::router::{RetrievalSignals, TieredRouter, relation};
 use super::store::{GraphStore, NodeRecord, Resolution};
@@ -82,6 +83,9 @@ pub struct QueryRequest {
     /// Ask a model to write the answer even when [`QueryConfig::model_answers`] is off.
     #[serde(default)]
     pub explain: bool,
+    /// Retrieval time budget in milliseconds; defaults to [`QueryConfig::timeout_ms`].
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl QueryRequest {
@@ -93,6 +97,7 @@ impl QueryRequest {
             top_k: None,
             max_context_tokens: None,
             explain: false,
+            timeout_ms: None,
         }
     }
 }
@@ -289,6 +294,10 @@ pub struct QueryResponse {
     pub usage: Vec<CallUsage>,
     /// Stage timings in milliseconds.
     pub timings_ms: BTreeMap<String, u64>,
+    /// `true` when graph traversal stopped early on its time or visit budget: the answer is
+    /// valid but may be incomplete.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// What the query engine is built from.
@@ -321,6 +330,12 @@ pub struct QueryEngine {
 
 /// Candidates kept for a name that several entities share.
 const AMBIGUOUS_CANDIDATES: usize = 6;
+/// Starting points taken from the fused search ranking when a question names nothing.
+const SEARCH_SEEDS: usize = 6;
+/// Nearest chunks asked of the vector index: more when a neural model's vectors are fused into
+/// the ranking, fewer when hash vectors only add trailing evidence.
+const VECTOR_HITS: usize = 12;
+const HASH_VECTOR_HITS: usize = 6;
 
 const ENTITY_KINDS: &[NodeKind] = &[
     NodeKind::Service,
@@ -345,6 +360,7 @@ struct Retrieved {
     reports: Vec<GapReport>,
     direct_answer: Option<String>,
     authoritative: bool,
+    truncated: bool,
 }
 
 /// The content words of a text, lower-cased and lightly stemmed, for matching a question
@@ -419,9 +435,22 @@ fn truncate(text: &str, max: usize) -> String {
 }
 
 impl QueryEngine {
-    /// Builds the engine.
-    pub fn new(deps: QueryDeps) -> Self {
+    /// Builds the engine. The store and the graph are tied together so that retrieval reads both
+    /// at the same version (see [`GraphStore::consistent`]).
+    pub fn new(mut deps: QueryDeps) -> Self {
+        match deps.store.mirror() {
+            Some(mirror) => deps.graph = mirror.clone(),
+            None => deps.store = deps.store.clone().with_mirror(deps.graph.clone()),
+        }
         Self { deps, depths: None }
+    }
+
+    /// The deadline of a retrieval that starts now.
+    fn deadline(&self, request: &QueryRequest) -> Option<Instant> {
+        let millis = request
+            .timeout_ms
+            .unwrap_or(self.deps.query_config.timeout_ms);
+        (millis > 0).then(|| Instant::now() + Duration::from_millis(millis))
     }
 
     /// Makes the engine depth-aware: answers that touch shallow sources are flagged, and
@@ -517,9 +546,40 @@ impl QueryEngine {
         Ok(out)
     }
 
-    /// Blocking retrieval: seeds, traversal, conflict resolution, context assembly.
+    /// Blocking retrieval: seeds, traversal, conflict resolution, context assembly, all against
+    /// one consistent version of the graph and its tables.
     fn retrieve_blocking(
         &self,
+        request: &QueryRequest,
+        intent: &QueryIntent,
+        vector_hits: &[ChunkId],
+    ) -> Result<Retrieved> {
+        let deadline = self.deadline(request);
+        self.deps
+            .store
+            .consistent(|graph| self.retrieve_in(graph, deadline, request, intent, vector_hits))
+    }
+
+    fn vector_hits(&self) -> usize {
+        if self.semantic_vectors() {
+            VECTOR_HITS
+        } else {
+            HASH_VECTOR_HITS
+        }
+    }
+
+    /// `true` when the vectors come from a neural embedding model rather than feature hashing.
+    fn semantic_vectors(&self) -> bool {
+        self.deps
+            .embedder
+            .as_ref()
+            .is_some_and(|embedder| !embedder.model_id().starts_with("hash"))
+    }
+
+    fn retrieve_in(
+        &self,
+        graph: &ContextGraph,
+        deadline: Option<Instant>,
         request: &QueryRequest,
         intent: &QueryIntent,
         vector_hits: &[ChunkId],
@@ -679,7 +739,13 @@ impl QueryEngine {
             }
         }
         let text_hits = store.search_chunks(&request.query, top_k)?;
-        if seeds.is_empty() {
+        // Nothing named and no kind of answer sought (an open question looking for passages):
+        // start from what the searches find, fused into one ranking, and let relevance flow one
+        // step along the graph's links (see `fusion`).
+        let mut searched: Vec<(NodeId, f32)> = Vec::new();
+        // A question looking for a kind of answer (an owner, a dependency) is answered from the
+        // nearest such node to its best name match, so its starting points keep that order.
+        if seeds.is_empty() && !intent.target_kinds.is_empty() {
             for hit in store.search_nodes(&request.query, &[], 3)? {
                 add(hit.node, 1.0, &mut seeds);
             }
@@ -687,14 +753,53 @@ impl QueryEngine {
                 add(hit.node, 1.5, &mut seeds);
             }
         }
+        if seeds.is_empty() {
+            let dedup = |nodes: &mut dyn Iterator<Item = NodeId>| {
+                let mut seen = HashSet::new();
+                nodes.filter(|node| seen.insert(*node)).collect::<Vec<_>>()
+            };
+            let by_name = dedup(
+                &mut store
+                    .search_nodes(&request.query, &[], 5)?
+                    .into_iter()
+                    .map(|hit| hit.node),
+            );
+            let by_text = dedup(&mut text_hits.iter().map(|hit| hit.node));
+            let mut rankings = vec![by_name, by_text];
+            // Hash vectors restate the full-text search; only a neural model's vectors add a
+            // ranking of their own.
+            if self.semantic_vectors() {
+                let mut by_vector = Vec::new();
+                for chunk in vector_hits {
+                    if let Some(chunk) = store.chunk(*chunk)? {
+                        by_vector.push(chunk.node);
+                    }
+                }
+                rankings.push(dedup(&mut by_vector.into_iter()));
+            }
+            let fused = fusion::rrf(&rankings, fusion::RRF_K);
+            for (rank, (node, _)) in fused.iter().take(SEARCH_SEEDS).enumerate() {
+                add(*node, 1.0 + 0.1 * rank as f32, &mut seeds);
+            }
+            searched = fusion::spread(
+                &fused,
+                |node| {
+                    graph
+                        .neighbors(node)
+                        .map(|step| (step.node, step.edge.weight))
+                        .collect::<Vec<_>>()
+                },
+                fusion::SPREAD_FROM,
+                fusion::SPREAD,
+            );
+        }
 
         // 2. Traverse.
         let profile = TraversalProfile::for_intent(intent.kind);
-        let limits = Limits::from(&self.deps.graph_config);
+        let limits = Limits::from(&self.deps.graph_config).until(deadline);
         let seed_ids: HashSet<NodeId> = seeds.iter().map(|seed| seed.node).collect();
-        let (paths, reached) = {
-            let graph = self.deps.graph.read();
-            let finder = Pathfinder::new(&graph, &self.deps.graph_config);
+        let (paths, reached, mut truncated) = {
+            let finder = Pathfinder::new(graph, &self.deps.graph_config);
             let paths = if intent.target_kinds.is_empty() {
                 Vec::new()
             } else {
@@ -707,7 +812,7 @@ impl QueryEngine {
                 )
             };
             let reached = finder.expand(&seeds, &profile, limits, top_k * 4);
-            (paths, reached)
+            (paths, reached, finder.truncated())
         };
         let paths: Vec<Path> = paths
             .into_iter()
@@ -718,7 +823,11 @@ impl QueryEngine {
         // A question that names its own path through the graph is answered by following it.
         let chain = relation::parse(&request.query);
         let followed = match &chain {
-            Some(chain) => self.follow(chain, &seeds, limits),
+            Some(chain) => {
+                let (followed, cut) = self.follow(graph, chain, &seeds, limits);
+                truncated |= cut;
+                followed
+            }
             None => Vec::new(),
         };
         let chain = chain.filter(|_| !followed.is_empty());
@@ -792,14 +901,27 @@ impl QueryEngine {
             .first()
             .is_some_and(|path| path.cost.is_authoritative());
         let mut overridden_refs = Vec::new();
+        // For a single-valued question, the nearest owner of each subject is the answer (with any
+        // others at the same distance and trust, e.g. two CODEOWNERS); owners further away, such as
+        // the team owning the enclosing component or the domain lead, are evidence.
+        let mut nearest: HashMap<NodeId, (usize, bool)> = HashMap::new();
         for (rank, path) in paths.iter().enumerate() {
             let Some(target) = path.target() else {
                 continue;
             };
             let overridden =
                 single_valued && rank > 0 && winner_authoritative && !path.cost.is_authoritative();
+            let shape = (path.steps.len(), path.cost.is_authoritative());
+            let secondary = single_valued
+                && !path.steps.is_empty()
+                && path
+                    .nodes
+                    .first()
+                    .is_some_and(|seed| *nearest.entry(*seed).or_insert(shape) != shape);
             let role = if overridden {
                 ItemRole::Overridden
+            } else if secondary {
+                ItemRole::Evidence
             } else {
                 ItemRole::Answer
             };
@@ -854,6 +976,16 @@ impl QueryEngine {
                 overridden: overridden_refs,
                 explanation,
             });
+        }
+        for (node, score) in searched.iter().take(top_k) {
+            push(
+                self,
+                *node,
+                ItemRole::Evidence,
+                0.9 * score,
+                None,
+                &mut bundle,
+            )?;
         }
         for seed in &seeds {
             push(self, seed.node, ItemRole::Evidence, 0.9, None, &mut bundle)?;
@@ -910,7 +1042,14 @@ impl QueryEngine {
                 confidence += 0.15;
             }
         }
-        let confidence = confidence.clamp(0.0, 1.0);
+        let mut confidence = confidence.clamp(0.0, 1.0);
+        // The question names something the graph does not hold, and nothing else it names was
+        // found: whatever the fuzzy matches lead to is about something else. Report the gap and
+        // the evidence, never an answer about a different entity.
+        let subject_missing = !exact && gaps.iter().any(|gap| gap.kind == "unresolved_entity");
+        if subject_missing {
+            confidence = confidence.min(0.3);
+        }
 
         if intent.kind == IntentKind::Ownership && !found_target && exact {
             let key = seeds
@@ -930,9 +1069,23 @@ impl QueryEngine {
         }
 
         let direct_answer = match &chain {
+            _ if subject_missing => None,
             Some(chain) => self.chain_answer(chain, &paths)?,
             None => self.direct_answer(intent, &seeds, &paths, &bundle, &ambiguous)?,
         };
+        if subject_missing {
+            for item in &mut bundle.items {
+                if item.role == ItemRole::Answer {
+                    item.role = ItemRole::Evidence;
+                }
+            }
+        }
+        if truncated {
+            gaps.push(Gap {
+                kind: "truncated".into(),
+                detail: "graph traversal stopped at its time or visit budget; the answer may be incomplete, so name the entity more precisely or raise `[query] timeout_ms` / `[graph] max_visits`".into(),
+            });
+        }
         for (name, count) in &ambiguous {
             gaps.push(Gap {
                 kind: "ambiguous_entity".into(),
@@ -948,14 +1101,21 @@ impl QueryEngine {
             reports,
             direct_answer,
             authoritative: winner_authoritative,
+            truncated,
         })
     }
 
     /// Follows a relation chain from the question's entities, hop by hop. Each hop keeps the
     /// most trustworthy nearest matches (or all of them, for hops such as "consumers"), and the
     /// returned paths run from the starting entity to each final answer. Empty when any hop
-    /// leads nowhere.
-    fn follow(&self, chain: &relation::Chain, seeds: &[Seed], limits: Limits) -> Vec<Path> {
+    /// leads nowhere. The flag is `true` when a hop's search was cut short.
+    fn follow(
+        &self,
+        graph: &ContextGraph,
+        chain: &relation::Chain,
+        seeds: &[Seed],
+        limits: Limits,
+    ) -> (Vec<Path>, bool) {
         let best = seeds
             .iter()
             .map(|seed| seed.cost)
@@ -969,8 +1129,7 @@ impl QueryEngine {
                 cost: PathCost::ZERO,
             })
             .collect();
-        let graph = self.deps.graph.read();
-        let finder = Pathfinder::new(&graph, &self.deps.graph_config);
+        let finder = Pathfinder::new(graph, &self.deps.graph_config);
         for hop in &chain.hops {
             let starts: Vec<Seed> = frontier
                 .iter()
@@ -981,7 +1140,7 @@ impl QueryEngine {
             goal.exclude = starts.iter().map(|seed| seed.node).collect();
             let found = finder.nearest(&starts, &goal, 50, &hop.profile(), limits);
             let Some(first) = found.first() else {
-                return Vec::new();
+                return (Vec::new(), finder.truncated());
             };
             let (top, fewest) = (
                 first.cost,
@@ -1010,7 +1169,7 @@ impl QueryEngine {
             frontier = next;
         }
         frontier.retain(|path| !path.steps.is_empty());
-        frontier
+        (frontier, finder.truncated())
     }
 
     /// The answer to a relation-chain question: the entities reached, how trustworthy the path
@@ -1274,7 +1433,7 @@ impl QueryEngine {
                 .embed(std::slice::from_ref(&request.query), EmbedKind::Query)
                 .await
             && let Some(vector) = embedded.pop()
-            && let Ok(hits) = vectors.search_async(vector, 6, None).await
+            && let Ok(hits) = vectors.search_async(vector, self.vector_hits(), None).await
         {
             vector_hits = hits.into_iter().map(|hit| hit.id).collect();
         }
@@ -1371,7 +1530,7 @@ impl QueryEngine {
                 (Some(ModelTier::System2), QueryMode::LocalOnly) => Some(ModelTier::System1),
                 (tier, _) => tier,
             };
-            route.reason = format!("{:?}", decision.reason);
+            route.reason = decision.reason.to_string();
             answer = retrieved.direct_answer.take();
             // Models write answers only when asked to: retrieval and direct answers never wait
             // on one.
@@ -1455,6 +1614,7 @@ impl QueryEngine {
             gaps: retrieved.gaps,
             usage,
             timings_ms: timings,
+            truncated: retrieved.truncated,
         })
     }
 

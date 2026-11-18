@@ -39,6 +39,10 @@ pub struct TierConfig {
     pub max_tokens: u32,
     /// Default sampling temperature.
     pub temperature: f32,
+    /// Context window requested from a local server (Ollama `num_ctx`), in tokens; 0 leaves it
+    /// to the server. A local server reserves memory for this window in every parallel slot, so
+    /// leaving it to a server whose default is large can exhaust GPU and system memory.
+    pub context_tokens: u32,
 }
 
 impl Default for TierConfig {
@@ -51,6 +55,7 @@ impl Default for TierConfig {
             timeout_secs: 120,
             max_tokens: 1024,
             temperature: 0.0,
+            context_tokens: 8192,
         }
     }
 }

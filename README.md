@@ -17,12 +17,22 @@ commit 4f2a9c1e07 by Alice Smith on 2025-03-01 — 1 line(s) [fix]
   pull request pr:ledger#7 "Retry charges" [merged]
     - Review by bob: "Unbounded retries will hammer the gateway." — dismissed: capped at three
   ticket PAY-12 "Charges fail intermittently under load" [done]
+
+$ anchor impact --diff                         # what depends on my uncommitted changes?
+Affected, directly or through what depends on them: 3 services, 7 files, 12 symbols
+   1 hop  service:checkout-api (service)
+       via file:ledger:src/charge.rs <-imports- file:checkout-api:src/pay.rs ...
+Owners to notify:
+  Checkout (team): service:checkout-api, ...
 ```
 
 - **Local first.** One binary and a SQLite file. No server, model or network required.
 - **Trust aware.** Code and approved records outrank wikis and tickets, and conflicts are
   reported with the winner.
-- **Fast.** Rules and graph traversal, about 6 ms per question; language models are optional.
+- **Fast.** Rules and graph traversal, about 4 ms per question; language models are optional.
+- **Change aware.** `impact` shows what depends on a whole diff, or on everything a team owns,
+  and who to tell, and can comment on every pull request ([CI](docs/ci.md)); `hotspots` finds the
+  most depended-on services and the ones owned by nobody or only ever changed by one person.
 - **Built for agents.** An MCP server and a skill for Claude Code, Cursor and others.
 - **Shareable.** A team server syncs the graph; each machine holds only the depth it needs.
 
@@ -42,16 +52,33 @@ what has been tested on each platform: [docs/install.md](docs/install.md).
 
 ## Quick start
 
-```sh
-anchor demo --out /tmp/demo && anchor --config /tmp/demo/anchor.toml ingest   # try it on sample data
+Try it on a generated organisation first (24 repositories with history, a wiki, tickets, code
+reviews, API approvals and an org chart):
 
-anchor source add ~/src/payments-api     # add your own repository and ingest it
+```sh
+anchor demo --out ~/anchor-demo
+export ANCHOR_CONFIG=~/anchor-demo/anchor.toml     # the commands below use the demo
+
+anchor ingest                                          # under a second
+anchor query "Who is responsible for the limits-gateway service?"
+anchor why identity-web:src/identity_web.c:41          # blame -> pull request -> review -> ticket
+anchor impact service:limits-gateway                   # what depends on it, and who to tell
+anchor hotspots                                        # most depended-on services, ownership risks
+```
+
+Then point it at your own code:
+
+```sh
+unset ANCHOR_CONFIG
+anchor source add ~/src/payments-api     # writes the config, infers kind and trust, ingests
 anchor query "Who owns the payments-api service?"
 anchor why src/ledger/charge.rs:120
+anchor impact --diff                     # run inside the repository
 anchor daemon                            # keep it current; dashboard on http://localhost:7890
 ```
 
-More: [commands](docs/commands.md) · [`anchor why`](docs/why.md)
+No model is needed for any of this. More: [commands](docs/commands.md) · [`anchor why`](docs/why.md) ·
+[impact on pull requests](docs/ci.md)
 
 ## Data sources
 
@@ -88,14 +115,18 @@ graph syncs as signed deltas. [docs/hosting.md](docs/hosting.md)
 
 ## Benchmarks
 
-On 735 questions over a 100-repository synthetic organisation, a reader model answered 85%
-correctly from Anchor's context, against 49% from the best LlamaIndex configuration, using less
-than half the tokens. The corpus is synthetic and favours the questions Anchor targets: read the
-method and caveats in [docs/benchmarks.md](docs/benchmarks.md).
+On a 100-repository synthetic organisation, Anchor's context held the answer to 99% of 735
+questions; on a 131-question sample, a reader model answered 85% correctly from it, against 49%
+from the best LlamaIndex configuration, using less than half the tokens. That corpus is
+synthetic and favours the questions Anchor targets. On the standard multi-hop benchmarks other
+graph-RAG systems report (MuSiQue, 2WikiMultiHopQA, HotpotQA: plain Wikipedia passages, no code
+or org chart), Anchor without a model links pages by the titles they name and averages 68.3
+recall@5, against 61.1 for BM25 and 87.1 for HippoRAG 2 with a 70B model; it is strongest on
+2WikiMultiHopQA (85.6) and level with BM25 on MuSiQue. Method, numbers and caveats: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Status
 
-Beta ([0.1.1-beta](https://github.com/David-A-Phillips/anchor/releases)). Developed and tested
+Beta ([0.1.2-beta](https://github.com/David-A-Phillips/anchor/releases)). Developed and tested
 on Linux x86_64; macOS and Windows builds are produced by CI but lightly exercised.
 [Architecture](docs/ARCHITECTURE.md) · [Development](docs/development.md) ·
 [Releasing](RELEASING.md)

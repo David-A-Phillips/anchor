@@ -1,3 +1,10 @@
+anchor-context (0.1.2~beta-1) unstable; urgency=medium
+
+  * See CHANGELOG.md: change impact and hotspots, consistent reads, saved graph,
+    query budgets, sync server on loopback by default.
+
+ -- David <phillipsadavid@gmail.com>  Wed, 18 Nov 2026 00:00:00 +0000
+
 anchor-context (0.1.1~beta-1) unstable; urgency=medium
 
   * Initial packaged release (see the GitHub release notes).

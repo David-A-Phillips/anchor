@@ -38,6 +38,12 @@ pub struct GraphConfig {
     pub max_hops: u32,
     /// Maximum total weighted cost of a path.
     pub max_cost: f32,
+    /// Maximum number of nodes a single search visits. Searches that hit it stop early and the
+    /// answer is marked as truncated.
+    pub max_visits: usize,
+    /// After a full scan, link wiki pages to the other pages whose titles they name (see
+    /// [`crate::engine::title_links`]).
+    pub title_links: bool,
 }
 
 impl Default for GraphConfig {
@@ -46,6 +52,8 @@ impl Default for GraphConfig {
             trust: TrustWeights::default(),
             max_hops: 6,
             max_cost: 64.0,
+            max_visits: 200_000,
+            title_links: true,
         }
     }
 }

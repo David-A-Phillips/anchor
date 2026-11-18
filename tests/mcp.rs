@@ -14,6 +14,10 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 fn server(dir: &std::path::Path) -> McpServer {
+    server_with(dir, |_| {})
+}
+
+fn server_with(dir: &std::path::Path, adjust: impl FnOnce(&mut AnchorConfig)) -> McpServer {
     let repo = dir.join("repo");
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("CODEOWNERS"), "* @acme/payments-platform\n").unwrap();
@@ -33,6 +37,7 @@ fn server(dir: &std::path::Path) -> McpServer {
     let mut source = SourceConfig::new("payments-api", SourceKind::Repo, repo.to_string_lossy());
     source.depth = Depth::PhoneBook;
     config.sources.push(source);
+    adjust(&mut config);
     let engine = Engine::open(config).unwrap();
     engine.scan_all().unwrap();
     let depths: Arc<dyn DepthControl> = engine.clone();
@@ -136,7 +141,8 @@ async fn an_agent_can_ask_see_shallow_areas_deepen_and_ask_again() {
     assert_eq!(
         names,
         [
-            "ask", "search", "get", "path", "why", "deepen", "ingest", "status"
+            "ask", "search", "get", "path", "why", "impact", "hotspots", "deepen", "ingest",
+            "status"
         ]
     );
     for tool in listed["result"]["tools"].as_array().unwrap() {
@@ -202,6 +208,58 @@ async fn an_agent_can_ask_see_shallow_areas_deepen_and_ask_again() {
     assert_eq!(path["found"], true, "{path}");
     assert_eq!(path["reference_only_elements"], 0);
     assert!(!path["steps"].as_array().unwrap().is_empty());
+    assert_eq!(path["truncated"], false);
+
+    // `charge` calls `validate`: changing `validate` affects `charge`, owned by the team.
+    let impact = client
+        .tool(
+            "impact",
+            json!({ "targets": ["validate", "no-such-file.rs"] }),
+        )
+        .await;
+    let dependents = impact["dependents"].as_array().unwrap();
+    assert!(
+        dependents
+            .iter()
+            .any(|d| d["entity"]["name"] == "charge" && d["hops"] == 1),
+        "{impact}"
+    );
+    assert!(
+        impact["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["problem"].is_string())
+    );
+    assert!(
+        impact["owners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["owner"]["kind"] == "team"),
+        "{impact}"
+    );
+    let only_services = client
+        .tool(
+            "impact",
+            json!({ "targets": ["validate"], "kinds": ["service"] }),
+        )
+        .await;
+    assert!(
+        only_services["dependents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["entity"]["kind"] == "service"),
+        "{only_services}"
+    );
+    let hotspots = client.tool("hotspots", json!({ "kind": "symbol" })).await;
+    assert_eq!(
+        hotspots["hotspots"][0]["entity"]["name"], "validate",
+        "{hotspots}"
+    );
+    assert_eq!(hotspots["hotspots"][0]["dependents"], 1);
+    assert_eq!(hotspots["hotspots"][0]["owner"]["owner"]["kind"], "team");
 
     // No daemon serves this configuration, so the agent is told to ingest; doing so is a no-op
     // on an unchanged tree.
@@ -269,4 +327,51 @@ async fn protocol_errors_are_reported_without_breaking_the_session() {
     let batch: Value = serde_json::from_str(&batch).unwrap();
     assert_eq!(batch.as_array().unwrap().len(), 1);
     assert_eq!(batch[0]["id"], 6);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn searches_cut_short_by_their_budget_say_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server_with(dir.path(), |config| {
+        config.graph.max_visits = 1;
+        config.sources[0].depth = Depth::Full;
+    });
+    assert!(server.tool_timeout() >= std::time::Duration::from_secs(3));
+    let mut client = Client::connect(server);
+    let answer = client
+        .tool("ask", json!({ "question": "What calls validate?" }))
+        .await;
+    assert_eq!(answer["truncated"], true, "{answer}");
+    assert!(
+        answer["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["kind"] == "truncated"),
+        "{answer}"
+    );
+    let path = client
+        .tool(
+            "path",
+            json!({ "from": "charge", "to": "payments-platform" }),
+        )
+        .await;
+    assert_eq!(path["found"], false);
+    assert_eq!(path["truncated"], true);
+
+    // Bad arguments are tool errors, not protocol errors.
+    let bad = client
+        .request(
+            "tools/call",
+            json!({ "name": "impact", "arguments": { "targets": [] } }),
+        )
+        .await;
+    assert_eq!(bad["result"]["isError"], true);
+    let bad_kind = client
+        .request(
+            "tools/call",
+            json!({ "name": "hotspots", "arguments": { "kind": "planet" } }),
+        )
+        .await;
+    assert_eq!(bad_kind["result"]["isError"], true);
 }

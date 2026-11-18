@@ -128,7 +128,14 @@ fn generated_tree_ingests_without_warnings() {
     ] {
         assert!(sources.contains(&expected), "{expected} not scanned");
     }
-    assert!(ingested.reports.iter().all(|r| r.units_applied > 0));
+    // Every configured source contributed; derived passes (title links) may find nothing.
+    assert!(
+        ingested
+            .reports
+            .iter()
+            .filter(|r| r.source != crate::engine::title_links::TITLE_LINK_SOURCE)
+            .all(|r| r.units_applied > 0)
+    );
 }
 
 #[test]
@@ -500,4 +507,37 @@ fn large_preset_generates_a_thousand_repositories() {
     let dir = tempfile::tempdir().expect("dir");
     let report = generate(&SynthSpec::preset(Preset::Large), dir.path()).expect("generate");
     assert_eq!(report.repositories, 1000);
+}
+
+#[test]
+fn the_optional_git_history_links_commits_to_pull_requests_and_tickets() {
+    if !super::git_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec = SynthSpec::preset(Preset::Tiny).seed(5);
+    super::generate(&spec, dir.path()).expect("generate");
+    let history = super::init_git(&spec, dir.path()).expect("history");
+    assert!(history.repositories > 0);
+    assert!(history.commits > history.repositories, "{history:?}");
+    // Idempotent: repositories that already have a history are left alone.
+    let again = super::init_git(&spec, dir.path()).expect("again");
+    assert_eq!(again.commits, 0);
+    // Every subject of a pull-request commit ends with its number.
+    let some_repo = std::fs::read_dir(dir.path().join("repos"))
+        .expect("repos")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            let log = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(["log", "--format=%s"])
+                .output()
+                .expect("git log");
+            String::from_utf8_lossy(&log.stdout)
+                .lines()
+                .any(|line| line.ends_with(')') && line.contains("(#"))
+        });
+    assert!(some_repo.is_some(), "no commit names a pull request");
 }

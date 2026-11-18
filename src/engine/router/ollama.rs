@@ -20,6 +20,7 @@ pub struct OllamaModel {
     api: OllamaApi,
     timeout: Duration,
     keep_alive: Option<String>,
+    context_tokens: Option<u32>,
 }
 
 impl OllamaModel {
@@ -36,7 +37,15 @@ impl OllamaModel {
             timeout: Duration::from_secs(60),
             // Keeps the model loaded between queries so classification stays fast.
             keep_alive: Some("10m".to_owned()),
+            context_tokens: None,
         })
+    }
+
+    /// Sets the context window requested with every call (`num_ctx`; `None` or 0: server
+    /// default). The same value on every call keeps the server from reloading the model.
+    pub fn with_context_tokens(mut self, tokens: Option<u32>) -> Self {
+        self.context_tokens = tokens.filter(|tokens| *tokens > 0);
+        self
     }
 
     /// Sets the request deadline.
@@ -78,7 +87,12 @@ fn role_name(role: Role) -> &'static str {
 }
 
 /// Builds the `/api/chat` body for a provider-independent request.
-fn chat_request(model: &str, keep_alive: Option<&str>, request: &CompletionRequest) -> ChatRequest {
+fn chat_request(
+    model: &str,
+    keep_alive: Option<&str>,
+    context_tokens: Option<u32>,
+    request: &CompletionRequest,
+) -> ChatRequest {
     let mut messages = Vec::with_capacity(request.messages.len() + 1);
     if let Some(system) = request.system.as_deref().filter(|s| !s.is_empty()) {
         messages.push(OllamaMessage {
@@ -102,6 +116,9 @@ fn chat_request(model: &str, keep_alive: Option<&str>, request: &CompletionReque
     if let Some(max_tokens) = request.max_tokens {
         options.insert("num_predict".to_owned(), json!(max_tokens));
     }
+    if let Some(tokens) = context_tokens {
+        options.insert("num_ctx".to_owned(), json!(tokens));
+    }
     ChatRequest {
         model: model.to_owned(),
         messages,
@@ -119,7 +136,12 @@ impl LanguageModel for OllamaModel {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ModelError> {
-        let body = chat_request(&self.info.model, self.keep_alive.as_deref(), &request);
+        let body = chat_request(
+            &self.info.model,
+            self.keep_alive.as_deref(),
+            self.context_tokens,
+            &request,
+        );
         let started = Instant::now();
         let response = self
             .api
@@ -212,7 +234,9 @@ mod tests {
             "eval_count": 8
         }))
         .await;
-        let model = OllamaModel::new(ModelTier::System1, &url, "llama3.2:3b").unwrap();
+        let model = OllamaModel::new(ModelTier::System1, &url, "llama3.2:3b")
+            .unwrap()
+            .with_context_tokens(Some(4096));
         let schema = json!({"type": "object"});
         let mut request = CompletionRequest::prompt(CallPurpose::Classify, "hello")
             .with_system("be terse")
@@ -234,6 +258,7 @@ mod tests {
         assert_eq!(body["keep_alive"], "10m");
         assert_eq!(body["format"], schema);
         assert_eq!(body["options"]["num_predict"], 64);
+        assert_eq!(body["options"]["num_ctx"], 4096);
         assert_eq!(body["options"]["temperature"], 0.0);
         assert_eq!(
             body["messages"],

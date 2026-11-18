@@ -18,13 +18,20 @@ Call Anchor first when the question is about something no single file states:
 |---|---|
 | Who owns / maintains / is on call for X? Who should review this? | `ask` |
 | Why is this code like this? Why was X blocked, rejected or dismissed? | `why` for code, `ask` for decisions |
-| What uses X? What breaks if I change it? Which team, domain or portfolio is X in? | `ask`, then `path` or `get` to follow up |
+| What uses X? Which team, domain or portfolio is X in? | `ask`, then `path` or `get` to follow up |
+| What breaks if I change these files? Who needs to review or be told? | `impact` with every changed file |
+| What are our riskiest dependencies? What has no owner, or only one person who knows it? | `hotspots` |
+| What depends on everything this team owns? (reorgs, handovers) | `impact` with the team's name |
 | What do the docs, runbook or tickets say about X? | `ask` |
 | Is there something called X? What is its exact name? | `search` |
 
 Before changing code whose purpose is unclear, run `why` on the file or lines
 (`path`, `path:120` or `path:120-160`): it returns the commits, pull request, review decisions,
 tickets and pages behind them.
+
+Before finishing a change that touches shared code, call `impact` with all the files you changed
+in one call. Mention the affected services and the owners it lists to the user, nearest first;
+`hops: 1` dependents are the ones most likely to break.
 
 Do not call it for what you can read directly: the contents of a file you already have open,
 syntax, or how to write code.
@@ -41,6 +48,9 @@ syntax, or how to write code.
 - `gaps` says what is missing (`ambiguous_entity`, `unresolved_entity`, `missing_neighbor`).
   For an ambiguous name, ask again naming the service or repository.
 - An empty or low-confidence result is information: say Anchor does not know, do not invent.
+- `truncated: true` means a search hit its time or size budget: the result is valid but may be
+  incomplete. Narrow the question (name the entity exactly, pass fewer targets) rather than
+  retrying it unchanged.
 
 Name entities exactly when you can (service slug, file path, API name, ticket id). Questions
 that spell out a relationship ("who leads the team that owns the component containing X")
@@ -77,6 +87,8 @@ list. Suggest removing one that no longer exists on disk. External systems are e
 ```sh
 anchor query "Who owns the payments-api service?" --json
 anchor why src/ledger/charge.rs:120 --json
+anchor impact --diff --json  # what depends on the files changed since HEAD; or name files/services
+anchor hotspots --json
 anchor status
 anchor ingest                # all sources; --source <id> for one
 ```

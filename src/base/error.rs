@@ -106,6 +106,21 @@ impl Error {
         Self::Other(message.into())
     }
 
+    /// The message without the category prefix `Display` adds ("not found: ", ...), for wrapping
+    /// one error's text in another without repeating the category.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Config(message)
+            | Self::Invalid(message)
+            | Self::NotFound(message)
+            | Self::Parse(message)
+            | Self::Sync(message)
+            | Self::Integrity(message)
+            | Self::Other(message) => message.clone(),
+            other => other.to_string(),
+        }
+    }
+
     /// Wraps a module-specific error, keeping it available through `source()`.
     pub fn module(
         module: &'static str,

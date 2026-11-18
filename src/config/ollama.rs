@@ -22,6 +22,12 @@ pub struct OllamaConfig {
     pub startup_timeout_secs: u64,
     /// How long models stay loaded after a request (Ollama `keep_alive`).
     pub keep_alive: String,
+    /// Requests a managed server runs at once (`OLLAMA_NUM_PARALLEL`).
+    pub num_parallel: u32,
+    /// Default context window of a managed server in tokens (`OLLAMA_CONTEXT_LENGTH`). The
+    /// server reserves this window in every parallel slot, so memory grows with
+    /// `num_parallel × context_tokens`.
+    pub context_tokens: u32,
 }
 
 impl Default for OllamaConfig {
@@ -33,6 +39,8 @@ impl Default for OllamaConfig {
             default_model: "llama3.2:3b".to_owned(),
             startup_timeout_secs: 60,
             keep_alive: "10m".to_owned(),
+            num_parallel: 4,
+            context_tokens: 8192,
         }
     }
 }

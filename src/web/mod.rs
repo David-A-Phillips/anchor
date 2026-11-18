@@ -82,7 +82,11 @@ async fn health() -> Json<Value> {
 
 async fn stats(State(state): State<WebState>) -> Api {
     let engine = state.engine.clone();
-    let stats = blocking(move || engine.store().stats()).await?;
+    let stats = blocking(move || {
+        engine.store().catch_up()?;
+        engine.store().stats()
+    })
+    .await?;
     let (nodes, edges, memory) = {
         let graph = state.engine.graph();
         let graph = graph.read();
@@ -158,6 +162,8 @@ struct PathParams {
 }
 
 async fn path(State(state): State<WebState>, Query(params): Query<PathParams>) -> Api {
+    let engine = state.engine.clone();
+    blocking(move || engine.store().catch_up()).await?;
     let config = state.engine.config().graph.clone();
     let found = {
         let graph = state.engine.graph();
@@ -342,6 +348,60 @@ async fn loopback_only(request: Request, next: Next) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct ImpactParams {
+    /// Comma-separated files, symbols, keys or names.
+    targets: String,
+    /// Comma-separated dependent kinds to keep.
+    kinds: Option<String>,
+    limit: Option<usize>,
+}
+
+fn comma_list(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+async fn impact(State(state): State<WebState>, Query(params): Query<ImpactParams>) -> Api {
+    let targets = comma_list(&params.targets);
+    let options = crate::engine::impact::ImpactOptions {
+        limit: params.limit.unwrap_or(50).clamp(1, 500),
+        kinds: comma_list(params.kinds.as_deref().unwrap_or(""))
+            .iter()
+            .map(|kind| kind.parse::<NodeKind>())
+            .collect::<Result<_>>()
+            .map_err(ApiError::from)?,
+        ..Default::default()
+    };
+    let engine = state.engine.clone();
+    let report = blocking(move || engine.impact(&targets, &options)).await?;
+    to_json(&report)
+}
+
+#[derive(Deserialize)]
+struct HotspotParams {
+    kind: Option<String>,
+    limit: Option<usize>,
+    min_dependents: Option<usize>,
+}
+
+async fn hotspots(State(state): State<WebState>, Query(params): Query<HotspotParams>) -> Api {
+    let options = crate::engine::impact::HotspotOptions {
+        kind: match params.kind.as_deref() {
+            Some(kind) if !kind.is_empty() => kind.parse::<NodeKind>().map_err(ApiError::from)?,
+            _ => NodeKind::Service,
+        },
+        limit: params.limit.unwrap_or(20).clamp(1, 200),
+        min_dependents: params.min_dependents.unwrap_or(1).max(1),
+    };
+    let engine = state.engine.clone();
+    let report = blocking(move || engine.hotspots(&options)).await?;
+    to_json(&report)
+}
+
 /// Builds the dashboard router.
 pub fn router(state: WebState) -> Router {
     Router::new()
@@ -352,6 +412,8 @@ pub fn router(state: WebState) -> Router {
         .route("/api/graph/node/{id}", get(node))
         .route("/api/graph/path", get(path))
         .route("/api/graph/hierarchy", get(hierarchy))
+        .route("/api/impact", get(impact))
+        .route("/api/hotspots", get(hotspots))
         .route("/api/query", post(run_query))
         .route("/api/backlog", get(backlog))
         .route("/api/backlog/{id}/{action}", post(backlog_action))

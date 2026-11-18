@@ -48,8 +48,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anchor"
-version = "0.1.1-beta"
+version = "0.1.2-beta"
 dependencies = [
+ "aho-corasick",
  "assert_cmd",
  "async-trait",
  "axum",
@@ -124,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "anchor-winsvc"
-version = "0.1.1-beta"
+version = "0.1.2-beta"
 dependencies = [
  "windows-service",
 ]

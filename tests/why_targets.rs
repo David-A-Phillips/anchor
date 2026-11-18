@@ -293,18 +293,15 @@ fn when_blame_is_not_available_the_file_history_is_used_and_the_gap_is_stated() 
     repo_with(&repo, &[("src/a.rs", "one\ntwo\nthree\n")]);
     let engine = open(config(dir.path(), &[("svc", &repo)]));
 
-    // A range beyond the end of the file.
-    let beyond = engine.why("src/a.rs:40-50").unwrap();
-    assert_eq!(beyond.method, "history");
+    // A range beyond the end of the file is a mistake in the question, reported as such.
+    let beyond = engine.why("src/a.rs:40-50").unwrap_err().to_string();
     assert!(
-        beyond
-            .gaps
-            .iter()
-            .any(|g| g.contains("blame is not available")),
-        "{:?}",
-        beyond.gaps
+        beyond.contains("has 3 lines; line 40 is past the end"),
+        "{beyond}"
     );
-    assert_eq!(beyond.commits.len(), 1, "the file's history still answers");
+    // A range that starts inside the file but runs past its end still answers.
+    let overlapping = engine.why("src/a.rs:2-50").unwrap();
+    assert_eq!(overlapping.commits.len(), 1, "{:?}", overlapping.gaps);
 
     // A file that exists on disk but was never committed.
     write(&repo.join("src/new.rs"), "fresh\n");

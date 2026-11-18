@@ -6,8 +6,10 @@
 //! positive, searches are bounded by hops and cost, and ties are broken by node id, so results are
 //! deterministic.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +26,21 @@ pub struct Limits {
     pub max_hops: u32,
     /// Maximum weighted cost of a path.
     pub max_cost: f32,
+    /// Maximum number of nodes one search settles before it stops early.
+    pub max_visits: usize,
+    /// Wall-clock time after which a search stops early.
+    pub deadline: Option<Instant>,
+}
+
+impl Limits {
+    /// The same limits, also ending at `deadline` (the earlier one wins).
+    pub fn until(mut self, deadline: Option<Instant>) -> Self {
+        self.deadline = match (self.deadline, deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self
+    }
 }
 
 impl From<&GraphConfig> for Limits {
@@ -31,6 +48,8 @@ impl From<&GraphConfig> for Limits {
         Self {
             max_hops: config.max_hops,
             max_cost: config.max_cost,
+            max_visits: config.max_visits.max(1),
+            deadline: None,
         }
     }
 }
@@ -161,6 +180,7 @@ impl Ord for QueueItem {
 pub struct Pathfinder<'a> {
     graph: &'a ContextGraph,
     model: CostModel,
+    truncated: Cell<bool>,
 }
 
 impl<'a> Pathfinder<'a> {
@@ -169,7 +189,19 @@ impl<'a> Pathfinder<'a> {
         Self {
             graph,
             model: CostModel::new(&config.trust),
+            truncated: Cell::new(false),
         }
+    }
+
+    /// `true` when any search so far stopped early on [`Limits::max_visits`] or
+    /// [`Limits::deadline`]: its results are valid but may be incomplete.
+    pub fn truncated(&self) -> bool {
+        self.truncated.get()
+    }
+
+    /// The graph searched.
+    pub fn graph(&self) -> &'a ContextGraph {
+        self.graph
     }
 
     fn search(
@@ -210,6 +242,15 @@ impl<'a> Pathfinder<'a> {
         while let Some(item) = queue.pop() {
             if settled.contains_key(&item.node) {
                 continue;
+            }
+            if settled.len() >= limits.max_visits
+                || (settled.len() % 256 == 255
+                    && limits
+                        .deadline
+                        .is_some_and(|deadline| Instant::now() >= deadline))
+            {
+                self.truncated.set(true);
+                break;
             }
             let Some(visit) = best.get(&item.node).copied() else {
                 continue;
@@ -357,6 +398,32 @@ impl<'a> Pathfinder<'a> {
             reached.len() < max_nodes
         });
         reached
+    }
+
+    /// The cheapest path from any seed to each node reachable from the seeds, cheapest first, at
+    /// most `max_nodes` of them; seeds themselves are not included. One search serves every
+    /// seed, so asking about many starting points costs about the same as asking about one.
+    pub fn reach(
+        &self,
+        seeds: &[Seed],
+        profile: &TraversalProfile,
+        limits: Limits,
+        max_nodes: usize,
+    ) -> Vec<Path> {
+        if max_nodes == 0 {
+            return Vec::new();
+        }
+        let mut order = Vec::new();
+        let settled = self.search(seeds, profile, limits, |node, visit| {
+            if visit.hops > 0 {
+                order.push(node);
+            }
+            order.len() < max_nodes
+        });
+        order
+            .into_iter()
+            .filter_map(|node| Self::build_path(&settled, node))
+            .collect()
     }
 
     /// Picks the winner among candidate answers to a single-valued question: the cheapest path
@@ -512,7 +579,7 @@ mod tests {
         );
         let tight = Limits {
             max_hops: 2,
-            max_cost: 64.0,
+            ..limits()
         };
         assert!(
             finder
@@ -559,6 +626,110 @@ mod tests {
             reached
                 .windows(2)
                 .all(|pair| { pair[0].cost.compare(&pair[1].cost, true) != Ordering::Greater })
+        );
+    }
+
+    /// A chain of `n` services, each depending on the next.
+    fn chain(n: i64) -> ContextGraph {
+        ContextGraph::from_parts(
+            (1..=n).map(|id| node(id, NodeKind::Service, SOT)),
+            (1..n).map(|id| edge(100 + id, id, id + 1, EdgeKind::DependsOn, SOT)),
+        )
+    }
+
+    #[test]
+    fn a_visit_budget_stops_the_search_and_reports_truncation() {
+        let graph = chain(50);
+        let config = GraphConfig::default();
+        let finder = Pathfinder::new(&graph, &config);
+        let general = TraversalProfile::general();
+        let open = Limits {
+            max_hops: 100,
+            max_cost: f32::MAX,
+            ..limits()
+        };
+        assert_eq!(
+            finder
+                .expand(&[Seed::new(NodeId(1))], &general, open, 1000)
+                .len(),
+            50
+        );
+        assert!(!finder.truncated());
+
+        let budget = Limits {
+            max_visits: 10,
+            ..open
+        };
+        let reached = finder.expand(&[Seed::new(NodeId(1))], &general, budget, 1000);
+        assert_eq!(reached.len(), 10);
+        assert!(finder.truncated());
+    }
+
+    #[test]
+    fn an_expired_deadline_stops_a_large_search() {
+        let graph = chain(2_000);
+        let config = GraphConfig::default();
+        let finder = Pathfinder::new(&graph, &config);
+        let expired = Limits {
+            max_hops: 10_000,
+            max_cost: f32::MAX,
+            ..limits()
+        }
+        .until(Some(Instant::now()));
+        let reached = finder.expand(
+            &[Seed::new(NodeId(1))],
+            &TraversalProfile::general(),
+            expired,
+            10_000,
+        );
+        assert!(reached.len() < 2_000);
+        assert!(finder.truncated());
+    }
+
+    #[test]
+    fn the_earlier_deadline_wins() {
+        let now = Instant::now();
+        let later = now + std::time::Duration::from_secs(5);
+        assert_eq!(
+            limits().until(Some(later)).until(Some(now)).deadline,
+            Some(now)
+        );
+        assert_eq!(limits().until(Some(now)).until(None).deadline, Some(now));
+    }
+
+    #[test]
+    fn reach_runs_one_search_from_many_seeds_and_keeps_each_cheapest_origin() {
+        // 1 -> 2 -> 3 and 10 -> 3: node 3 is one hop from 10 and two from 1.
+        let graph = ContextGraph::from_parts(
+            [1, 2, 3, 10].map(|id| node(id, NodeKind::Service, SOT)),
+            [
+                edge(100, 1, 2, EdgeKind::DependsOn, SOT),
+                edge(101, 2, 3, EdgeKind::DependsOn, SOT),
+                edge(102, 10, 3, EdgeKind::DependsOn, SOT),
+            ],
+        );
+        let config = GraphConfig::default();
+        let finder = Pathfinder::new(&graph, &config);
+        let forward = TraversalProfile::new().allow(EdgeKind::DependsOn, Direction::Forward, 1.0);
+        let paths = finder.reach(
+            &[Seed::new(NodeId(1)), Seed::new(NodeId(10))],
+            &forward,
+            limits(),
+            10,
+        );
+        let targets: Vec<_> = paths.iter().filter_map(Path::target).collect();
+        assert_eq!(targets, vec![NodeId(2), NodeId(3)]);
+        let to_three = &paths[1];
+        assert_eq!(to_three.nodes, vec![NodeId(10), NodeId(3)]);
+        assert!(
+            finder
+                .reach(&[Seed::new(NodeId(3))], &forward, limits(), 10)
+                .is_empty()
+        );
+        assert!(
+            finder
+                .reach(&[Seed::new(NodeId(1))], &forward, limits(), 0)
+                .is_empty()
         );
     }
 }

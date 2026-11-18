@@ -1,0 +1,52 @@
+# Posts what a pull request may affect, and who owns it, as a comment on the pull request.
+# Copy to .github/workflows/anchor-impact.yml. See docs/ci.md.
+name: Change impact
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  impact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the diff needs the base branch
+
+      - name: Install Anchor
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/David-A-Phillips/anchor/main/scripts/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Index this repository and compute the impact
+        env:
+          ANCHOR_CONFIG: ${{ runner.temp }}/anchor/anchor.toml
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          anchor init
+          anchor source add .
+          anchor ingest
+          anchor impact --diff "$BASE" --markdown > "$RUNNER_TEMP/impact.md"
+          cat "$RUNNER_TEMP/impact.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        # Pull requests from forks get a read-only token; the job summary still has the report.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- anchor-impact -->'
+          body="$marker
+          $(cat "$RUNNER_TEMP/impact.md")"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null
+          fi

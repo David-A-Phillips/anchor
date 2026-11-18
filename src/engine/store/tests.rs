@@ -500,3 +500,284 @@ fn small_unit_update_is_fast() {
         started.elapsed()
     );
 }
+
+// --- graph versions, the delta log, mirrors and consistent reads --------------------------------
+
+fn file_store(dir: &std::path::Path) -> GraphStore {
+    let store = GraphStore::new(Db::open(dir.join("anchor.db")).expect("db")).expect("store");
+    for (id, kind, trust) in [
+        ("repo", SourceKind::Repo, TrustLevel::SourceOfTruth),
+        ("wiki", SourceKind::Wiki, TrustLevel::ReferenceOnly),
+        ("org", SourceKind::OrgModel, TrustLevel::SourceOfTruth),
+    ] {
+        store
+            .upsert_source(&SourceDescriptor {
+                id: SourceId::new(id),
+                kind,
+                name: id.to_owned(),
+                trust,
+            })
+            .expect("source");
+    }
+    store
+}
+
+fn sorted(graph: &ContextGraph) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+    let mut nodes: Vec<_> = graph.nodes().collect();
+    let mut edges: Vec<_> = graph.edges().collect();
+    nodes.sort_by_key(|n| n.id);
+    edges.sort_by_key(|e| e.id);
+    (nodes, edges)
+}
+
+fn assert_mirrors(store: &GraphStore, graph: &ContextGraph) {
+    let image = store.graph_image().expect("image");
+    assert_eq!(graph.stamp(), (image.epoch.as_str(), image.version));
+    assert_eq!(sorted(graph), (image.nodes, image.edges));
+}
+
+/// A unit asserting one service per name, so each call changes the graph.
+fn services(names: &[String]) -> Unit {
+    let mut unit = unit("repo", &format!("svc-{}", names.join("-")), UnitKind::File);
+    for name in names {
+        unit.add_node(NodeAssertion::new(
+            NodeKind::Service,
+            keys::service(name),
+            name.clone(),
+        ));
+    }
+    unit
+}
+
+#[test]
+fn graph_changes_bump_the_version_and_log_their_delta_but_no_ops_do_not() {
+    let store = store();
+    let (epoch, start) = store.graph_version().expect("version");
+    assert_eq!(epoch.len(), 32);
+    store.apply_unit(&codeowners(), &version(1)).expect("apply");
+    store.apply_unit(&wiki_page(), &version(2)).expect("apply");
+    let (_, after) = store.graph_version().expect("version");
+    assert_eq!(after, start + 2);
+
+    // Identical content: no graph change, no new version.
+    store.apply_unit(&codeowners(), &version(3)).expect("apply");
+    assert_eq!(store.graph_version().expect("version").1, after);
+
+    // Replaying the log onto the starting graph reproduces the tables.
+    let mut replayed = ContextGraph::new();
+    for delta in store
+        .deltas_between(0, after)
+        .expect("log")
+        .expect("complete")
+    {
+        replayed.apply(&delta);
+    }
+    let (nodes, edges) = store.load_graph().expect("graph");
+    assert_eq!(sorted(&replayed), (nodes, edges));
+
+    // A pruned log cannot serve a replay from before the pruning point.
+    store.prune_graph_log(after - 1).expect("prune");
+    assert_eq!(store.graph_log_len().expect("len"), 1);
+    assert!(store.deltas_between(0, after).expect("log").is_none());
+    assert_eq!(
+        store
+            .deltas_between(after - 1, after)
+            .expect("log")
+            .map(|d| d.len()),
+        Some(1)
+    );
+}
+
+#[test]
+fn a_mirror_follows_every_write_including_removals_and_rebuilds() {
+    let store = store();
+    let graph = store
+        .graph_image()
+        .expect("image")
+        .into_graph()
+        .into_shared();
+    let store = store.with_mirror(graph.clone());
+    store.apply_unit(&codeowners(), &version(1)).expect("apply");
+    store.apply_unit(&wiki_page(), &version(2)).expect("apply");
+    assert_mirrors(&store, &graph.read());
+    let key = codeowners().key.clone();
+    store.remove_unit(&key, &version(3)).expect("remove");
+    assert_mirrors(&store, &graph.read());
+    store.rebuild().expect("rebuild");
+    assert_mirrors(&store, &graph.read());
+    // The rebuild cleared the log: readers that were behind must reload.
+    assert_eq!(store.graph_log_len().expect("len"), 0);
+}
+
+#[test]
+fn a_graph_catches_up_with_writes_made_by_another_process() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reader = file_store(dir.path());
+    let graph = reader
+        .graph_image()
+        .expect("image")
+        .into_graph()
+        .into_shared();
+    let reader = reader.with_mirror(graph.clone());
+
+    // A second handle on the same file, as a daemon in another process would have.
+    let writer =
+        GraphStore::new(Db::open(dir.path().join("anchor.db")).expect("db")).expect("store");
+    writer
+        .apply_unit(&codeowners(), &version(1))
+        .expect("apply");
+    writer.apply_unit(&wiki_page(), &version(2)).expect("apply");
+    assert_ne!(graph.read().stamp().1, writer.graph_version().expect("v").1);
+
+    let caught = reader.catch_up().expect("catch up");
+    assert_eq!(
+        caught,
+        CatchUp {
+            replayed: 2,
+            reloaded: false
+        }
+    );
+    assert_mirrors(&reader, &graph.read());
+    assert_eq!(reader.catch_up().expect("again"), CatchUp::default());
+
+    // Once the log no longer reaches back far enough, the graph is reloaded instead.
+    writer
+        .apply_unit(&services(&["late".into()]), &version(3))
+        .expect("apply");
+    let (_, now) = writer.graph_version().expect("v");
+    writer.prune_graph_log(now).expect("prune");
+    let caught = reader.catch_up().expect("catch up");
+    assert!(caught.reloaded);
+    assert_mirrors(&reader, &graph.read());
+}
+
+#[test]
+fn consistent_reads_bring_a_stale_mirror_up_to_date_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reader = file_store(dir.path());
+    let graph = reader
+        .graph_image()
+        .expect("image")
+        .into_graph()
+        .into_shared();
+    let reader = reader.with_mirror(graph.clone());
+    let writer =
+        GraphStore::new(Db::open(dir.path().join("anchor.db")).expect("db")).expect("store");
+    writer
+        .apply_unit(&codeowners(), &version(1))
+        .expect("apply");
+
+    let seen = reader
+        .consistent(|graph| {
+            let rows: i64 = reader
+                .db()
+                .read(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?))?;
+            Ok((graph.node_count(), rows as usize))
+        })
+        .expect("read");
+    assert_eq!(seen, (2, 2));
+}
+
+#[test]
+fn consistent_reads_never_see_the_graph_and_tables_disagree_under_concurrent_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = file_store(dir.path());
+    let graph = store
+        .graph_image()
+        .expect("image")
+        .into_graph()
+        .into_shared();
+    let store = store.with_mirror(graph);
+
+    let writer = {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            for n in 1..=300u64 {
+                let names = vec![format!("svc-{n}-a"), format!("svc-{n}-b")];
+                store
+                    .apply_unit(&services(&names), &version(n))
+                    .expect("apply");
+            }
+        })
+    };
+    // Check for as long as the writer runs, so every check races a write.
+    let mut checks = 0;
+    let mut distinct = std::collections::BTreeSet::new();
+    while !writer.is_finished() || checks == 0 {
+        let (in_memory, in_tables) = store
+            .consistent(|graph| {
+                let count = || -> Result<i64> {
+                    store.db().read(|conn| {
+                        Ok(conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?)
+                    })
+                };
+                let before = count()?;
+                std::thread::yield_now();
+                let after = count()?;
+                assert_eq!(before, after, "two reads in one consistent read differ");
+                Ok((graph.node_count(), after as usize))
+            })
+            .expect("consistent");
+        assert_eq!(in_memory, in_tables, "graph and tables disagree");
+        distinct.insert(in_tables);
+        checks += 1;
+    }
+    writer.join().expect("writer");
+    // The reads interleaved with the writes rather than all landing before or after them.
+    assert!(
+        distinct.len() > 5,
+        "only {} distinct states seen",
+        distinct.len()
+    );
+}
+
+#[test]
+fn writes_inside_a_consistent_read_are_refused_instead_of_deadlocking() {
+    let store = store();
+    let graph = store
+        .graph_image()
+        .expect("image")
+        .into_graph()
+        .into_shared();
+    let store = store.with_mirror(graph);
+    let inner = store.clone();
+    let result = store.consistent(|_| inner.apply_unit(&codeowners(), &version(1)).map(|_| ()));
+    assert!(result.is_err());
+    // The store is still usable afterwards.
+    store.apply_unit(&codeowners(), &version(2)).expect("apply");
+}
+
+#[test]
+fn consistent_reads_need_a_mirror() {
+    assert!(store().consistent(|_| Ok(())).is_err());
+}
+
+#[test]
+fn a_local_write_also_brings_in_what_another_process_wrote_before_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let local = file_store(dir.path());
+    let graph = local
+        .graph_image()
+        .expect("image")
+        .into_graph()
+        .into_shared();
+    let local = local.with_mirror(graph.clone());
+    let other =
+        GraphStore::new(Db::open(dir.path().join("anchor.db")).expect("db")).expect("store");
+    other.apply_unit(&codeowners(), &version(1)).expect("apply");
+    // The next local write replays the other process's change before its own.
+    local.apply_unit(&wiki_page(), &version(2)).expect("apply");
+    assert_mirrors(&local, &graph.read());
+
+    // When the log no longer reaches back, the local write rebuilds the mirror instead.
+    other
+        .apply_unit(&services(&["gap".into()]), &version(3))
+        .expect("apply");
+    other
+        .prune_graph_log(other.graph_version().expect("v").1)
+        .expect("prune");
+    local
+        .apply_unit(&services(&["after-gap".into()]), &version(4))
+        .expect("apply");
+    assert_mirrors(&local, &graph.read());
+}

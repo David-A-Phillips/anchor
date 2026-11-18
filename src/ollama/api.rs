@@ -276,17 +276,39 @@ pub struct OllamaApi {
 /// is only ever detected by this timeout.
 const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Connect deadline for a server on this machine. A loopback connection opens in well under a
+/// millisecond when something listens; waiting longer only delays the fallback (and every
+/// question) when nothing does, which matters most where closed ports are dropped, not refused.
+const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// `true` when `base_url` names this machine.
+fn is_loopback(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
 
 impl OllamaApi {
     /// Creates a client for the server at `base_url` (see [`normalize_base_url`]).
     pub fn new(base_url: &str) -> Result<Self, OllamaError> {
         let base_url = normalize_base_url(base_url)?;
-        let http = http_client_builder()
-            .build()
-            .map_err(|err| OllamaError::Unreachable {
-                url: base_url.clone(),
-                reason: err.to_string(),
-            })?;
+        let mut builder = http_client_builder();
+        if is_loopback(&base_url) {
+            builder = builder.connect_timeout(LOOPBACK_CONNECT_TIMEOUT);
+        }
+        let http = builder.build().map_err(|err| OllamaError::Unreachable {
+            url: base_url.clone(),
+            reason: err.to_string(),
+        })?;
         Ok(Self {
             base_url,
             http,
@@ -579,6 +601,25 @@ fn handle_pull_line(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn loopback_hosts_are_recognised() {
+        for url in [
+            "http://127.0.0.1:11434",
+            "http://localhost:11434/",
+            "http://[::1]:11434",
+            "http://127.1.2.3",
+        ] {
+            assert!(super::is_loopback(url), "{url}");
+        }
+        for url in [
+            "http://10.0.0.5:11434",
+            "https://ollama.example.com",
+            "not a url",
+        ] {
+            assert!(!super::is_loopback(url), "{url}");
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/David-A-Phillips/anchor/main/scripts/install.sh | sh
 #
 # Environment:
-#   ANCHOR_REPO         GitHub "owner/name" (default: David-A-Phillips/anchor, a PLACEHOLDER: set it)
+#   ANCHOR_REPO         GitHub "owner/name" (default: David-A-Phillips/anchor; set it for a fork)
 #   ANCHOR_VERSION      version without the leading "v" (default: latest release)
 #   ANCHOR_INSTALL_DIR  install directory (default: $HOME/.local/bin)
 #   ANCHOR_BASE_URL     directory URL holding the archive and its .sha256 file (a mirror or a
@@ -28,12 +28,6 @@ else
   die "need curl or wget"
 fi
 
-case "$ANCHOR_REPO" in
-  David-A-Phillips/*) if [ -z "${ANCHOR_BASE_URL:-}" ]; then
-    die "ANCHOR_REPO is still the placeholder '$ANCHOR_REPO'; set ANCHOR_REPO=owner/name (or ANCHOR_BASE_URL)"
-  fi ;;
-esac
-
 os=$(uname -s)
 arch=$(uname -m)
 case "$os" in
@@ -52,16 +46,19 @@ version="${ANCHOR_VERSION:-}"
 version="${version#v}"
 if [ -z "$version" ]; then
   [ -z "${ANCHOR_BASE_URL:-}" ] || die "ANCHOR_BASE_URL requires ANCHOR_VERSION"
-  # /releases/latest redirects to /releases/tag/vX.Y.Z
-  if have curl; then
-    final=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${ANCHOR_REPO}/releases/latest") \
-      || die "cannot resolve the latest release of ${ANCHOR_REPO}"
-  else
-    die "resolving the latest version needs curl; set ANCHOR_VERSION instead"
-  fi
-  version="${final##*/}"
+  have curl || die "resolving the latest version needs curl; set ANCHOR_VERSION instead"
+  # /releases/latest redirects to /releases/tag/vX.Y.Z, but only for a full release: GitHub
+  # leaves pre-releases out of it. Without a full release, take the newest release of any kind.
+  final=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${ANCHOR_REPO}/releases/latest") \
+    || die "cannot resolve the latest release of ${ANCHOR_REPO}"
+  case "$final" in
+    */releases/tag/*) version="${final##*/}" ;;
+    *) version=$(curl -fsSL "https://api.github.com/repos/${ANCHOR_REPO}/releases?per_page=1" \
+         | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1) \
+         || die "cannot list the releases of ${ANCHOR_REPO}" ;;
+  esac
   version="${version#v}"
-  [ -n "$version" ] || die "cannot determine the latest version"
+  [ -n "$version" ] || die "cannot determine the latest version of ${ANCHOR_REPO}; set ANCHOR_VERSION"
 fi
 
 name="anchor-${version}-${target}"

@@ -11,7 +11,7 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 use super::embed::{HashEmbedder, VectorIndex, build_embedder, index_chunks};
-use super::graph::{ContextGraph, SharedGraph};
+use super::graph::{SharedGraph, load_snapshot, save_snapshot};
 use super::ingest::ownership::{
     OwnershipFileKind, OwnershipRules, ownership_file_kind, parse_codeowners, parse_maintainers,
     parse_owners_tree,
@@ -105,6 +105,24 @@ pub struct LatencyStats {
 }
 
 const LATENCY_WINDOW: usize = 1024;
+/// Graph versions to accumulate before the daemon saves a fresh graph snapshot.
+const SNAPSHOT_EVERY: u64 = 500;
+/// Logged deltas kept behind the saved snapshot, so other processes (an MCP server, a second
+/// CLI) can still catch up by replaying instead of reloading.
+const LOG_SLACK: u64 = 1_000;
+
+/// How the in-memory graph was obtained at start-up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GraphOpen {
+    /// A saved snapshot was used as the base.
+    pub from_snapshot: bool,
+    /// Logged deltas replayed on top of it.
+    pub replayed: u64,
+    /// The graph was rebuilt from the database tables.
+    pub reloaded: bool,
+    /// Milliseconds spent.
+    pub millis: u64,
+}
 const BATCH: usize = 256;
 
 /// Pulls the deeper tiles of a source from a sync server (blocking). Implemented by the sync
@@ -137,6 +155,8 @@ pub struct Engine {
     manifest: Mutex<HashMap<(SourceId, String), (u64, i128)>>,
     depths: Mutex<HashMap<SourceId, Depth>>,
     remote: Mutex<Option<Arc<dyn RemoteTiles>>>,
+    graph_open: GraphOpen,
+    snapshot_version: Mutex<u64>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -179,8 +199,9 @@ impl Engine {
         for source in config.sources.iter().filter(|source| source.enabled) {
             store.upsert_source(&source.descriptor())?;
         }
-        let (nodes, edges) = store.load_graph()?;
-        let graph = ContextGraph::from_parts(nodes, edges).into_shared();
+        let (graph, graph_open) = Self::open_graph(&store, &paths)?;
+        let store = store.with_mirror(graph.clone());
+        let snapshot_version = graph.read().stamp().1;
         let clock = HlcClock::starting_after(store.max_hlc()?);
         let identity = DeviceIdentity::load_or_create(&paths.keys_dir())?;
         let device = identity.device_id().clone();
@@ -234,7 +255,68 @@ impl Engine {
             manifest: Mutex::new(HashMap::new()),
             depths: Mutex::new(HashMap::new()),
             remote: Mutex::new(None),
+            graph_open,
+            snapshot_version: Mutex::new(snapshot_version),
         }))
+    }
+
+    /// Loads the saved graph snapshot (if any) and brings it up to the database's version by
+    /// replaying the delta log, or rebuilds the graph from the tables when it cannot. A fresh
+    /// snapshot is saved when that took real work.
+    fn open_graph(store: &GraphStore, paths: &AnchorPaths) -> Result<(SharedGraph, GraphOpen)> {
+        let started = Instant::now();
+        let path = paths.graph_snapshot();
+        let base = match load_snapshot(&path) {
+            Ok(graph) => graph,
+            Err(err) => {
+                tracing::warn!("ignoring the saved graph ({err}); rebuilding it from the database");
+                None
+            }
+        };
+        let from_snapshot = base.is_some();
+        let graph = base.unwrap_or_default().into_shared();
+        let caught = store.catch_up_graph(&graph)?;
+        let open = GraphOpen {
+            from_snapshot: from_snapshot && !caught.reloaded,
+            replayed: caught.replayed,
+            reloaded: caught.reloaded,
+            millis: started.elapsed().as_millis() as u64,
+        };
+        if caught.reloaded || caught.replayed > 0 {
+            let saved = save_snapshot(&graph.read(), &path).and_then(|_| {
+                let version = graph.read().stamp().1;
+                store.prune_graph_log(version.saturating_sub(LOG_SLACK))
+            });
+            if let Err(err) = saved {
+                tracing::warn!("saving the graph snapshot failed: {err}");
+            }
+        }
+        Ok((graph, open))
+    }
+
+    /// How the in-memory graph was obtained when the engine opened.
+    pub fn graph_open(&self) -> GraphOpen {
+        self.graph_open
+    }
+
+    /// Saves the in-memory graph to disk and trims the delta log behind it. With `force` false,
+    /// only when at least [`SNAPSHOT_EVERY`] versions have accumulated since the last save.
+    /// Returns `true` when a snapshot was written.
+    pub fn save_graph_snapshot(&self, force: bool) -> Result<bool> {
+        let mut saved = self.snapshot_version.lock();
+        let version = {
+            let graph = self.graph.read();
+            let version = graph.stamp().1;
+            if version == *saved || (!force && version < saved.saturating_add(SNAPSHOT_EVERY)) {
+                return Ok(false);
+            }
+            save_snapshot(&graph, &self.paths.graph_snapshot())?;
+            version
+        };
+        *saved = version;
+        self.store
+            .prune_graph_log(version.saturating_sub(LOG_SLACK))?;
+        Ok(true)
     }
 
     /// The configuration the engine was opened with.
@@ -426,7 +508,7 @@ impl Engine {
     /// Used for local writes and by the sync layer after applying remote units.
     pub fn absorb(&self, outcome: &ApplyOutcome) -> Result<()> {
         if !outcome.delta.is_empty() {
-            self.graph.write().apply(&outcome.delta);
+            // The store applied the delta to the in-memory graph when it committed.
             self.publish(EngineEvent::GraphChanged {
                 nodes_upserted: outcome.delta.nodes_upserted.len(),
                 nodes_removed: outcome.delta.nodes_removed.len(),
@@ -565,10 +647,16 @@ impl Engine {
         let mut sources: Vec<&SourceConfig> =
             self.config.sources.iter().filter(|s| s.enabled).collect();
         sources.sort_by_key(|source| (order(source.kind), source.id.clone()));
-        sources
+        let wiki = sources.iter().any(|source| source.kind == SourceKind::Wiki);
+        let mut reports = sources
             .into_iter()
             .map(|source| self.scan_source(&source.id))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        // Page-to-page links need every page's title, so they follow a full scan.
+        if wiki && self.config.graph.title_links {
+            reports.push(self.link_titles()?);
+        }
+        Ok(reports)
     }
 
     /// Scans one source and brings the graph up to date with it.
@@ -1189,6 +1277,9 @@ impl Engine {
 
     /// Flushes buffered state (the token ledger) to disk.
     pub fn flush(&self) -> Result<()> {
+        if let Err(err) = self.save_graph_snapshot(true) {
+            tracing::warn!("saving the graph snapshot failed: {err}");
+        }
         self.ledger.flush()
     }
 }

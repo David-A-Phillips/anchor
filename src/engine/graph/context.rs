@@ -50,6 +50,8 @@ pub struct ContextGraph {
     nodes: HashMap<NodeId, NodeIndex<u32>>,
     edges: HashMap<EdgeId, EdgeIndex<u32>>,
     ignored_edges: u64,
+    epoch: String,
+    version: u64,
 }
 
 impl ContextGraph {
@@ -71,6 +73,18 @@ impl ContextGraph {
             graph.upsert_edge(edge);
         }
         graph
+    }
+
+    /// The store state this graph mirrors: the database's graph epoch and the graph version of
+    /// the last delta applied. A graph built by hand has an empty epoch and version 0.
+    pub fn stamp(&self) -> (&str, u64) {
+        (&self.epoch, self.version)
+    }
+
+    /// Records the store state this graph now mirrors.
+    pub fn set_stamp(&mut self, epoch: impl Into<String>, version: u64) {
+        self.epoch = epoch.into();
+        self.version = version;
     }
 
     /// Wraps the graph in the shared handle.

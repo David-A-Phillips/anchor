@@ -27,6 +27,7 @@
 
 mod code;
 mod config;
+mod history;
 mod jira;
 mod org;
 mod plan;
@@ -53,6 +54,7 @@ use crate::base::Result;
 use plan::Plan;
 use writer::Writer;
 
+pub use history::{GitHistory, git_available, init_git};
 pub use spec::{CaseRates, LanguageWeight, Preset, SynthLanguage, SynthSpec};
 pub use truth::{
     GroundTruth, JustificationKind, JustificationQuestion, OwnershipKind, OwnershipQuestion,

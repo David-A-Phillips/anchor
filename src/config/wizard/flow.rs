@@ -261,7 +261,7 @@ impl Session<'_> {
             Mode::Server => {
                 let current = self.config.sync.listen.clone();
                 let listen = self.ask_valid(
-                    "Address the sync server listens on (host:port)",
+                    "Address the sync server listens on (host:port; 0.0.0.0:7891 accepts other machines)",
                     Some(&current),
                     |text| match text.rsplit_once(':') {
                         Some((host, port))

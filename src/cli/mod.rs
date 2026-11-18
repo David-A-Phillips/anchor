@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::base::{Error, Result, SourceId};
+use crate::base::{Error, NodeKind, Result, SourceId, SourceKind};
 use crate::config::provision::{
     OllamaManager, ProvisionEvent, ProvisionOptions, RebuildOptions, TeardownOptions,
 };
@@ -32,7 +32,12 @@ use crate::sync::{
 
 /// Anchor: a local-first context engine that grounds AI models in your code, docs and org.
 #[derive(Debug, Parser)]
-#[command(name = "anchor", version, about)]
+#[command(
+    name = "anchor",
+    version,
+    about = "One graph of your code, docs, tickets and org chart that answers who owns it, why it is this way, and what depends on it.",
+    after_help = "Getting started:\n  anchor demo --out ~/anchor-demo     try it on a generated organisation\n  anchor source add <path>            index one of your repositories\n\nDocumentation: https://github.com/David-A-Phillips/anchor#readme"
+)]
 struct Cli {
     /// Configuration file (default: $ANCHOR_CONFIG or the platform config directory).
     #[arg(long, global = true, env = "ANCHOR_CONFIG")]
@@ -102,6 +107,10 @@ enum Command {
         /// Maximum nodes to process in this run.
         #[arg(long, default_value_t = 200)]
         limit: usize,
+        /// Ask only for the entities each text refers to and link them; no summaries, tags or
+        /// questions. About a quarter of the model output of a full pass.
+        #[arg(long)]
+        links_only: bool,
     },
     /// Score the engine against questions with known answers (see `anchor demo`).
     Eval {
@@ -123,6 +132,44 @@ enum Command {
     Why {
         /// `path`, `path:line`, `path:start-end`, `source:path[:lines]` or a symbol name.
         target: String,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// What could break: everything that depends on any of these files, symbols or entities,
+    /// and the owners to notify.
+    Impact {
+        /// Files (`path`, `source:path`), symbols, entity keys (`service:payments-api`) or names.
+        targets: Vec<String>,
+        /// Also take every file changed since this git revision in the current repository
+        /// (default `HEAD`: uncommitted changes).
+        #[arg(long, value_name = "REV", num_args = 0..=1, default_missing_value = "HEAD")]
+        diff: Option<String>,
+        /// Only report dependents of this kind (repeatable): service, file, symbol, api_spec, ...
+        #[arg(long = "kind", value_name = "KIND")]
+        kinds: Vec<String>,
+        /// Maximum dependents listed.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Print the report as JSON.
+        #[arg(long, conflicts_with = "markdown")]
+        json: bool,
+        /// Print the report as Markdown, for a pull-request comment.
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// The most depended-on services (or files, symbols, ...), who owns them, and which have no
+    /// owner or a single-person owner.
+    Hotspots {
+        /// Granularity: service, component, api_spec, api_endpoint, file or symbol.
+        #[arg(long, default_value = "service")]
+        kind: String,
+        /// Entries listed.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Only list entities with at least this many dependents.
+        #[arg(long, default_value_t = 1)]
+        min_dependents: usize,
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
@@ -210,6 +257,9 @@ enum Command {
         /// Seed: the same seed always yields the same dataset.
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// Do not give the repositories a git history (as the benchmark corpus is built).
+        #[arg(long)]
+        no_history: bool,
     },
     /// Manage the local Ollama backend.
     Ollama {
@@ -352,6 +402,138 @@ fn run_mcp_action(action: McpAction, config: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// Files changed since `rev` in the git repository containing `cwd`, plus untracked new files, as
+/// targets for `anchor impact`: absolute paths for files that exist, `source:path` for deleted
+/// files that live in a configured repository (their nodes are still in the graph until the next
+/// ingest). Sorted and deduplicated.
+pub(crate) fn changed_files(rev: &str, config: &AnchorConfig, cwd: &Path) -> Result<Vec<String>> {
+    let git = |dir: &Path, args: &[&str]| -> Result<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()?;
+        if !output.status.success() {
+            return Err(Error::invalid(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let top = match git(cwd, &["rev-parse", "--show-toplevel"]) {
+        Ok(top) => PathBuf::from(top.trim()),
+        Err(_) => {
+            return Err(Error::invalid(format!(
+                "--diff takes the changed files from git, but {} is not inside a git repository",
+                cwd.display()
+            )));
+        }
+    };
+    let roots: Vec<(String, PathBuf)> = config
+        .sources
+        .iter()
+        .filter(|source| source.enabled && source.kind == SourceKind::Repo)
+        .filter_map(|source| {
+            let root = PathBuf::from(&source.location).canonicalize().ok()?;
+            Some((source.id.to_string(), root))
+        })
+        .collect();
+    let top = top.canonicalize().unwrap_or(top);
+    // Changed tracked files (relative to the top), then new files git does not track yet.
+    let mut changed: Vec<String> = git(&top, &["diff", "--name-only", rev, "--"])?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    changed.extend(
+        git(&top, &["ls-files", "--others", "--exclude-standard"])?
+            .lines()
+            .map(str::to_owned),
+    );
+    let mut out = Vec::new();
+    for line in &changed {
+        let rel = line.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let path = top.join(rel);
+        if path.is_file() {
+            out.push(path.to_string_lossy().into_owned());
+            continue;
+        }
+        let in_source = roots
+            .iter()
+            .filter_map(|(id, root)| Some((id, path.strip_prefix(root).ok()?)))
+            .max_by_key(|(_, rest)| std::cmp::Reverse(rest.components().count()));
+        match in_source {
+            Some((id, rest)) => out.push(format!(
+                "{id}:{}",
+                rest.to_string_lossy().replace('\\', "/")
+            )),
+            None => out.push(path.to_string_lossy().into_owned()),
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// The configuration written on a first run (`init`, or `source add` without a config file):
+/// the defaults, minus the local model tier when no model server answers, so questions never
+/// wait on a server that is not there. Returns the note to print about it.
+async fn first_run_config() -> (AnchorConfig, Option<String>) {
+    let mut config = AnchorConfig::default();
+    let url = config
+        .models
+        .system1
+        .base_url
+        .clone()
+        .unwrap_or_else(|| config.ollama.base_url.clone());
+    let reachable = match crate::ollama::OllamaApi::new(&url) {
+        Ok(api) => {
+            api.with_probe_timeout(Duration::from_millis(300))
+                .is_reachable()
+                .await
+        }
+        Err(_) => false,
+    };
+    if reachable {
+        return (config, None);
+    }
+    config.models.system1.provider = crate::engine::router::ProviderKind::Disabled;
+    (
+        config,
+        Some(format!(
+            "No local model server answered at {url}, so none is configured: questions are \
+             classified by rules and answered from the graph (no model is needed). `anchor setup` \
+             adds one later."
+        )),
+    )
+}
+
+/// Tells a new user, on stderr, why there is nothing to answer from. Returns `true` when nothing
+/// is configured (no file, or a standalone configuration without sources).
+fn hint_if_unconfigured(config: &AnchorConfig, path: &Path) -> bool {
+    let missing = !path.exists();
+    let empty = config.sources.is_empty() && config.mode == crate::config::Mode::Standalone;
+    if !missing && !empty {
+        return false;
+    }
+    if missing {
+        eprintln!(
+            "No configuration at {}: nothing is indexed yet.",
+            path.display()
+        );
+    } else {
+        eprintln!("No sources in {}: nothing is indexed yet.", path.display());
+    }
+    eprintln!(
+        "Start with `anchor source add <path-to-a-repository>`, or try sample data with \
+         `anchor demo --out <dir>`."
+    );
+    true
+}
+
 fn load_config(path: Option<&Path>) -> Result<(AnchorConfig, PathBuf)> {
     let path = path.map_or_else(default_config_path, Path::to_path_buf);
     Ok((AnchorConfig::load_or_default(&path)?, path))
@@ -479,9 +661,14 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     path.display()
                 )));
             }
-            AnchorConfig::default().save(&path)?;
+            let (config, note) = first_run_config().await;
+            config.save(&path)?;
+            if let Some(note) = note {
+                println!("{note}");
+            }
             println!(
-                "Wrote {}. Add [[sources]] entries, then run `anchor ingest`.",
+                "Wrote {}.\nNext: `anchor source add <path>` to index a repository (or uncomment the \
+                 [[sources]] example at the end of the file and run `anchor ingest`).",
                 path.display()
             );
         }
@@ -509,7 +696,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Command::Ingest { source } => {
-            let (config, _) = load_config(cli.config.as_deref())?;
+            let (config, path) = load_config(cli.config.as_deref())?;
+            if hint_if_unconfigured(&config, &path) {
+                return Ok(());
+            }
             let engine = open_engine(config).await?;
             install_remote(&engine)?;
             let scan = engine.clone();
@@ -544,7 +734,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             retrieval_only,
             explain,
         } => {
-            let (config, _) = load_config(cli.config.as_deref())?;
+            let (config, path) = load_config(cli.config.as_deref())?;
+            hint_if_unconfigured(&config, &path);
             let engine = open_engine(config).await?;
             install_remote(&engine)?;
             let mut request = QueryRequest::new(text);
@@ -562,16 +753,37 @@ async fn dispatch(cli: Cli) -> Result<()> {
             } else {
                 match &response.answer {
                     Some(answer) => println!("{answer}\n"),
-                    None => println!("(no answer; showing retrieved context)\n"),
+                    None => match response
+                        .gaps
+                        .iter()
+                        .find(|gap| gap.kind == "unresolved_entity")
+                    {
+                        Some(gap) => println!(
+                            "No answer: {}. Check the spelling, or see what is indexed with `anchor status`.\n",
+                            gap.detail
+                        ),
+                        None => println!(
+                            "No direct answer in the graph; the closest evidence follows.\n"
+                        ),
+                    },
                 }
+                let source = match response.route.tier {
+                    Some(tier) => format!("written by the {tier} model"),
+                    None => "from the graph".to_owned(),
+                };
                 println!(
-                    "confidence {:.2} · intent {} · {}",
-                    response.confidence, response.intent.kind, response.route.reason
+                    "confidence {:.2} · {} question · {source}",
+                    response.confidence, response.intent.kind
                 );
                 for item in response.context.items.iter().take(8) {
+                    let role = match item.role {
+                        crate::engine::query::ItemRole::Answer => "answer",
+                        crate::engine::query::ItemRole::Evidence => "evidence",
+                        crate::engine::query::ItemRole::Overridden => "overridden",
+                    };
                     println!(
-                        "  [{:?}] {} `{}` ({})",
-                        item.role, item.node.name, item.node.key, item.node.trust
+                        "  [{role}] {} `{}` ({})",
+                        item.node.name, item.node.key, item.node.trust
                     );
                 }
                 for area in &response.shallow {
@@ -634,7 +846,15 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let (config, path) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             let stats = engine.store().stats()?;
-            println!("config   {}", path.display());
+            println!(
+                "config   {}{}",
+                path.display(),
+                if path.exists() {
+                    ""
+                } else {
+                    " (not created yet)"
+                }
+            );
             println!("data     {}", engine.paths().root().display());
             println!(
                 "graph    {} nodes, {} edges, {} units, {} chunks, {} pending references, {:.1} MB on disk",
@@ -644,6 +864,21 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 stats.chunk_count,
                 stats.pending_edges,
                 stats.db_bytes as f64 / 1e6
+            );
+            let opened = engine.graph_open();
+            println!(
+                "loaded   in {} ms, {}",
+                opened.millis,
+                if opened.reloaded {
+                    "rebuilt from the database".to_owned()
+                } else if opened.replayed > 0 {
+                    format!(
+                        "from the saved graph plus {} logged changes",
+                        opened.replayed
+                    )
+                } else {
+                    "from the saved graph".to_owned()
+                }
             );
             for (kind, count) in &stats.nodes {
                 println!("  {kind:<14} {count}");
@@ -760,7 +995,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 report.pushed, report.pulled, report.rejected, report.bytes, report.duration
             );
         }
-        Command::Demo { out, scale, seed } => {
+        Command::Demo {
+            out,
+            scale,
+            seed,
+            no_history,
+        } => {
             let preset = match scale {
                 DemoScale::Tiny => crate::synth::Preset::Tiny,
                 DemoScale::Small => crate::synth::Preset::Small,
@@ -768,13 +1008,40 @@ async fn dispatch(cli: Cli) -> Result<()> {
             };
             let spec = crate::synth::SynthSpec::preset(preset).seed(seed);
             let target = out.clone();
+            let generated = spec.clone();
             let report =
-                tokio::task::spawn_blocking(move || crate::synth::generate(&spec, &target))
+                tokio::task::spawn_blocking(move || crate::synth::generate(&generated, &target))
                     .await??;
+            // A git history makes `anchor why` work on the sample data too.
+            let history = if no_history {
+                None
+            } else if crate::synth::git_available() {
+                let target = std::fs::canonicalize(&out)?;
+                match tokio::task::spawn_blocking(move || crate::synth::init_git(&spec, &target))
+                    .await?
+                {
+                    Ok(history) => Some(history),
+                    Err(err) => {
+                        eprintln!(
+                            "note: could not create the git history ({err}); `anchor why` will have no commits to show"
+                        );
+                        None
+                    }
+                }
+            } else {
+                eprintln!(
+                    "note: git is not installed, so the sample repositories have no history for `anchor why`"
+                );
+                None
+            };
             println!(
-                "Generated {} repositories ({} source files), {} wiki pages, {} issues, {} pull requests and {} questions ({:.1} MB) in {}.",
+                "Generated {} repositories ({} source files{}), {} wiki pages, {} issues, {} pull requests and {} questions ({:.1} MB) in {}.",
                 report.repositories,
                 report.source_files,
+                history
+                    .as_ref()
+                    .map(|h| format!(", {} commits", h.commits))
+                    .unwrap_or_default(),
                 report.wiki_pages,
                 report.tickets,
                 report.pull_requests,
@@ -782,26 +1049,41 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 report.total_bytes() as f64 / 1e6,
                 out.display()
             );
-            let config = out.join("anchor.toml");
-            println!("\nIngest it (no model or network needed):");
-            println!("  anchor --config {} ingest", config.display());
-            let example = std::fs::read_to_string(out.join("ground_truth.json"))
+            let config = std::fs::canonicalize(out.join("anchor.toml"))?;
+            let anchor = format!("anchor --config {}", config.display());
+            let truth = std::fs::read_to_string(out.join("ground_truth.json"))
                 .ok()
-                .and_then(|text| serde_json::from_str::<crate::synth::GroundTruth>(&text).ok())
-                .and_then(|truth| truth.ownership.first().map(|q| q.question.clone()))
-                .unwrap_or_else(|| "Who owns the payments-api service?".to_owned());
-            println!("Then ask:");
+                .and_then(|text| serde_json::from_str::<crate::synth::GroundTruth>(&text).ok());
+            let ownership = truth
+                .as_ref()
+                .and_then(|truth| truth.ownership.first())
+                .map(|q| (q.question.clone(), q.subject_key.clone()));
+            println!("\nIngest it (no model or network needed):");
+            println!("  {anchor} ingest");
+            println!("\nThen try:");
+            if let Some((question, subject)) = &ownership {
+                println!("  {anchor} query \"{question}\"");
+                println!("  {anchor} impact {subject}");
+            }
+            if let Some(example) = history.as_ref().and_then(|h| h.example.clone()) {
+                println!("  {anchor} why {example}");
+            }
+            println!("  {anchor} hotspots");
             println!(
-                "  anchor --config {} query \"{example}\" --retrieval-only",
-                config.display()
-            );
-            println!(
-                "Questions with known answers are in {}.",
-                out.join("ground_truth.json").display()
+                "\nQuestions with known answers are in {}.",
+                std::fs::canonicalize(out.join("ground_truth.json"))?.display()
             );
         }
         Command::Source { action } => {
-            let (config, path) = load_config(cli.config.as_deref())?;
+            let (mut config, path) = load_config(cli.config.as_deref())?;
+            if !path.exists() && matches!(action, source::SourceAction::Add { .. }) {
+                let (fresh, note) = first_run_config().await;
+                config = fresh;
+                println!("Creating {}.", path.display());
+                if let Some(note) = note {
+                    println!("{note}");
+                }
+            }
             let lines =
                 tokio::task::spawn_blocking(move || source::run(action, config, &path)).await??;
             for line in lines {
@@ -929,7 +1211,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             engine.flush()?;
         }
         Command::Why { target, json } => {
-            let (config, _) = load_config(cli.config.as_deref())?;
+            let (config, path) = load_config(cli.config.as_deref())?;
+            hint_if_unconfigured(&config, &path);
             let engine = open_engine(config).await?;
             let asked = engine.clone();
             let report = tokio::task::spawn_blocking(move || asked.why(&target)).await??;
@@ -937,6 +1220,95 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", crate::engine::why::render(&report));
+            }
+        }
+        Command::Impact {
+            mut targets,
+            diff,
+            kinds,
+            limit,
+            json,
+            markdown,
+        } => {
+            let (config, path) = load_config(cli.config.as_deref())?;
+            hint_if_unconfigured(&config, &path);
+            let from_diff = diff.is_some();
+            if let Some(rev) = &diff {
+                let changed = changed_files(rev, &config, &std::env::current_dir()?)?;
+                if changed.is_empty() && targets.is_empty() {
+                    if json {
+                        let empty = crate::engine::impact::ImpactReport::default();
+                        println!("{}", serde_json::to_string_pretty(&empty)?);
+                    } else {
+                        println!("No files changed since {rev}: nothing to check.");
+                    }
+                    return Ok(());
+                }
+                targets.extend(changed);
+            }
+            if targets.is_empty() {
+                return Err(Error::invalid(
+                    "name files, symbols or entities, or use --diff to take the files changed in git",
+                ));
+            }
+            let options = crate::engine::impact::ImpactOptions {
+                limit: limit.max(1),
+                kinds: kinds
+                    .iter()
+                    .map(|kind| kind.parse::<NodeKind>())
+                    .collect::<Result<_>>()?,
+                ..Default::default()
+            };
+            let engine = open_engine(config).await?;
+            let report =
+                match tokio::task::spawn_blocking(move || engine.impact(&targets, &options)).await?
+                {
+                    Ok(report) => report,
+                    // Changed files that are not in the graph (configuration, docs Anchor does not
+                    // index, files outside every source) have nothing depending on them.
+                    Err(Error::NotFound(detail)) if from_diff => {
+                        if json {
+                            let report = crate::engine::impact::ImpactReport {
+                                gaps: vec![format!(
+                                    "none of the changed files is in the graph: {detail}"
+                                )],
+                                ..Default::default()
+                            };
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            println!("None of the changed files is in the graph: {detail}");
+                        }
+                        return Ok(());
+                    }
+                    Err(err) => return Err(err),
+                };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if markdown {
+                print!("{}", crate::engine::impact::render_impact_markdown(&report));
+            } else {
+                print!("{}", crate::engine::impact::render_impact(&report));
+            }
+        }
+        Command::Hotspots {
+            kind,
+            limit,
+            min_dependents,
+            json,
+        } => {
+            let (config, path) = load_config(cli.config.as_deref())?;
+            hint_if_unconfigured(&config, &path);
+            let options = crate::engine::impact::HotspotOptions {
+                kind: kind.parse::<NodeKind>()?,
+                limit: limit.max(1),
+                min_dependents,
+            };
+            let engine = open_engine(config).await?;
+            let report = tokio::task::spawn_blocking(move || engine.hotspots(&options)).await??;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", crate::engine::impact::render_hotspots(&report));
             }
         }
         Command::Compare {
@@ -979,7 +1351,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 print!("{}", compare::render_footprints(&footprints));
             }
         }
-        Command::Enrich { limit } => {
+        Command::Enrich { limit, links_only } => {
             let (config, _) = load_config(cli.config.as_deref())?;
             let engine = open_engine(config).await?;
             if engine
@@ -991,7 +1363,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     "enrichment needs a System 1 model: set [models.system1] (see `anchor ollama provision`)",
                 ));
             }
-            let report = engine.enrich(limit).await?;
+            let mode = if links_only {
+                crate::engine::enrich::EnrichMode::Links
+            } else {
+                crate::engine::enrich::EnrichMode::Full
+            };
+            let report = engine.enrich_mode(limit, mode).await?;
             println!(
                 "Enriched {} nodes ({} unchanged, {} failed, {} left for a later run).",
                 report.enriched, report.unchanged, report.failed, report.remaining

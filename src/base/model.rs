@@ -522,10 +522,209 @@ impl GraphDelta {
     }
 }
 
+/// Fixed-width little-endian encoding of graph rows, shared by the store's delta log and the
+/// on-disk graph snapshot. Ten bytes per node, thirty per edge.
+pub mod graph_codec {
+    use super::{EdgeId, EdgeKind, GraphDelta, GraphEdge, GraphNode, NodeId, NodeKind, TrustLevel};
+    use crate::base::{Error, Result};
+
+    /// Encoded size of a node.
+    pub const NODE_BYTES: usize = 10;
+    /// Encoded size of an edge.
+    pub const EDGE_BYTES: usize = 30;
+
+    /// Appends a node.
+    pub fn put_node(out: &mut Vec<u8>, node: &GraphNode) {
+        out.extend_from_slice(&node.id.0.to_le_bytes());
+        out.push(node.kind.code());
+        out.push(node.trust.code());
+    }
+
+    /// Appends an edge.
+    pub fn put_edge(out: &mut Vec<u8>, edge: &GraphEdge) {
+        out.extend_from_slice(&edge.id.0.to_le_bytes());
+        out.extend_from_slice(&edge.from.0.to_le_bytes());
+        out.extend_from_slice(&edge.to.0.to_le_bytes());
+        out.push(edge.kind.code());
+        out.push(edge.trust.code());
+        out.extend_from_slice(&edge.weight.to_le_bytes());
+    }
+
+    /// Reads values from an encoded buffer, failing on truncation or unknown codes.
+    #[derive(Debug)]
+    pub struct Reader<'a> {
+        bytes: &'a [u8],
+    }
+
+    impl<'a> Reader<'a> {
+        /// A reader over `bytes`.
+        pub fn new(bytes: &'a [u8]) -> Self {
+            Self { bytes }
+        }
+
+        /// `true` when everything has been read.
+        pub fn is_empty(&self) -> bool {
+            self.bytes.is_empty()
+        }
+
+        /// The next `n` bytes.
+        pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+            if self.bytes.len() < n {
+                return Err(Error::other("encoded graph data is truncated"));
+            }
+            let (head, tail) = self.bytes.split_at(n);
+            self.bytes = tail;
+            Ok(head)
+        }
+
+        /// A little-endian `u64`.
+        pub fn u64(&mut self) -> Result<u64> {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(self.take(8)?);
+            Ok(u64::from_le_bytes(raw))
+        }
+
+        fn i64(&mut self) -> Result<i64> {
+            Ok(self.u64()? as i64)
+        }
+
+        fn u8(&mut self) -> Result<u8> {
+            Ok(self.take(1)?[0])
+        }
+
+        fn trust(&mut self) -> Result<TrustLevel> {
+            let code = self.u8()?;
+            TrustLevel::from_code(code)
+                .ok_or_else(|| Error::other(format!("unknown trust code {code}")))
+        }
+
+        /// A count, checked against the bytes left so a corrupt length cannot allocate wildly.
+        pub fn count(&mut self, item_bytes: usize) -> Result<usize> {
+            let count = self.u64()? as usize;
+            if count.saturating_mul(item_bytes) > self.bytes.len() {
+                return Err(Error::other("encoded graph data is truncated"));
+            }
+            Ok(count)
+        }
+
+        /// A node.
+        pub fn node(&mut self) -> Result<GraphNode> {
+            let id = NodeId(self.i64()?);
+            let code = self.u8()?;
+            let kind = NodeKind::from_code(code)
+                .ok_or_else(|| Error::other(format!("unknown node kind code {code}")))?;
+            Ok(GraphNode {
+                id,
+                kind,
+                trust: self.trust()?,
+            })
+        }
+
+        /// An edge.
+        pub fn edge(&mut self) -> Result<GraphEdge> {
+            let id = EdgeId(self.i64()?);
+            let from = NodeId(self.i64()?);
+            let to = NodeId(self.i64()?);
+            let code = self.u8()?;
+            let kind = EdgeKind::from_code(code)
+                .ok_or_else(|| Error::other(format!("unknown edge kind code {code}")))?;
+            let trust = self.trust()?;
+            let mut raw = [0u8; 4];
+            raw.copy_from_slice(self.take(4)?);
+            Ok(GraphEdge {
+                id,
+                from,
+                to,
+                kind,
+                trust,
+                weight: f32::from_le_bytes(raw),
+            })
+        }
+    }
+
+    /// Encodes a delta.
+    pub fn encode_delta(delta: &GraphDelta) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            32 + delta.nodes_upserted.len() * NODE_BYTES
+                + delta.edges_upserted.len() * EDGE_BYTES
+                + (delta.nodes_removed.len() + delta.edges_removed.len()) * 8,
+        );
+        out.extend_from_slice(&(delta.nodes_upserted.len() as u64).to_le_bytes());
+        for node in &delta.nodes_upserted {
+            put_node(&mut out, node);
+        }
+        out.extend_from_slice(&(delta.nodes_removed.len() as u64).to_le_bytes());
+        for id in &delta.nodes_removed {
+            out.extend_from_slice(&id.0.to_le_bytes());
+        }
+        out.extend_from_slice(&(delta.edges_upserted.len() as u64).to_le_bytes());
+        for edge in &delta.edges_upserted {
+            put_edge(&mut out, edge);
+        }
+        out.extend_from_slice(&(delta.edges_removed.len() as u64).to_le_bytes());
+        for id in &delta.edges_removed {
+            out.extend_from_slice(&id.0.to_le_bytes());
+        }
+        out
+    }
+
+    /// Decodes a delta written by [`encode_delta`].
+    pub fn decode_delta(bytes: &[u8]) -> Result<GraphDelta> {
+        let mut reader = Reader::new(bytes);
+        let mut delta = GraphDelta::default();
+        for _ in 0..reader.count(NODE_BYTES)? {
+            delta.nodes_upserted.push(reader.node()?);
+        }
+        for _ in 0..reader.count(8)? {
+            delta.nodes_removed.push(NodeId(reader.i64()?));
+        }
+        for _ in 0..reader.count(EDGE_BYTES)? {
+            delta.edges_upserted.push(reader.edge()?);
+        }
+        for _ in 0..reader.count(8)? {
+            delta.edges_removed.push(EdgeId(reader.i64()?));
+        }
+        if !reader.is_empty() {
+            return Err(Error::other("trailing bytes after an encoded graph delta"));
+        }
+        Ok(delta)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::base::keys;
+
+    #[test]
+    fn graph_deltas_round_trip_through_the_binary_codec() {
+        let delta = GraphDelta {
+            nodes_upserted: vec![GraphNode {
+                id: NodeId(7),
+                kind: NodeKind::Service,
+                trust: TrustLevel::SourceOfTruth,
+            }],
+            nodes_removed: vec![NodeId(3)],
+            edges_upserted: vec![GraphEdge {
+                id: EdgeId(-2),
+                from: NodeId(7),
+                to: NodeId(9),
+                kind: EdgeKind::DependsOn,
+                trust: TrustLevel::ReferenceOnly,
+                weight: 0.25,
+            }],
+            edges_removed: vec![EdgeId(11), EdgeId(12)],
+        };
+        let bytes = graph_codec::encode_delta(&delta);
+        assert_eq!(graph_codec::decode_delta(&bytes).expect("decode"), delta);
+        assert!(graph_codec::decode_delta(&bytes[..bytes.len() - 1]).is_err());
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(graph_codec::decode_delta(&longer).is_err());
+        let mut huge = bytes;
+        huge[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(graph_codec::decode_delta(&huge).is_err());
+    }
 
     fn sample_unit() -> Unit {
         let source = SourceId::new("payments-api");

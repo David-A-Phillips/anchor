@@ -42,10 +42,11 @@ request reviews) into `./corpus` for scale testing.
 ## Measured retrieval quality
 
 `cargo test --all-features --test e2e -- --nocapture` scores 166 generated questions with known
-answers by node key. Current results: ownership recall 1.00 and top-answer accuracy 0.99, with
-stale reference-only claims never winning; multi-hop relationship questions recall 1.00 and
-precision 1.00; justification recall 0.66 by key (the neutral, text-based score below is higher,
-because the reason is usually returned on the answer rather than as a separate comment node).
+answers by node key. Current results: ownership recall 1.00, answer precision 0.91 and
+top-answer accuracy 0.99, with stale reference-only claims never winning; multi-hop relationship questions recall 1.00 and
+precision 1.00; justification recall 0.66 by key (the neutral, text-based score in
+[benchmarks.md](benchmarks.md) is higher, because the reason is usually returned on the answer
+rather than as a separate comment node).
 
 ## Known limitations
 
@@ -58,6 +59,8 @@ because the reason is usually returned on the answer rather than as a separate c
   beyond the answer.
 - Two graph nodes that already exist are not merged retroactively when a later source reveals
   they are the same entity; `GraphStore::rebuild` re-materialises the graph and heals this.
+- Links between wiki pages by title (`graph.title_links`) are rebuilt after a full scan
+  (`anchor ingest`, the daemon's start), not when the watcher applies a single changed file.
 - Wiki prose is linked to entities it mentions, but ownership stated only in prose is not turned
   into an ownership claim.
 - Managed Ollama installation supports Linux only.

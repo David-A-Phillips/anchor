@@ -51,7 +51,10 @@ base_url = "https://api.openai.com/v1"   # or your gateway
 api_key_env = "OPENAI_API_KEY"
 ```
 
-Each tier also takes `timeout_secs`, `max_tokens` and `temperature`.
+Each tier also takes `timeout_secs`, `max_tokens` and `temperature`, and for Ollama
+`context_tokens` (default 8,192; 0 leaves it to the server): the context window asked for on
+every call. A local server reserves that window in each of its parallel slots, so a server left
+to choose may reserve far more memory than the GPU has and spill into system memory.
 
 Only the Ollama provider has been exercised against a real server. The Anthropic and
 OpenAI-compatible providers are covered by tests against mocked responses; no real
@@ -79,9 +82,28 @@ answered straight from the graph; nothing waits on a model unless you ask for pr
 |-------|---------------------|------|
 | Classification | The local System 1 model reads a question only when the rules cannot classify it (multi-hop "who leads the team that owns…" questions). Its reading is cached, so a repeated question is instant. | At question time, as a fallback |
 | Answers | `anchor query --explain` (or `query.model_answers = true`) has a model write a prose answer from the retrieved evidence. | Only on request |
-| Enrichment | `anchor enrich` has System 1 summarise and tag wiki pages, tickets, pull requests and APIs, and name the entities they are about. Tags become searchable aliases; named entities become links. Stored as a `reference_only` source, so it never overrides an authoritative fact. | In the background, after ingestion (the daemon does it automatically) |
+| Enrichment | `anchor enrich` has System 1 summarise and tag wiki pages, tickets, pull requests and APIs, and name the entities they are about. Tags become searchable aliases; named entities (services, teams, tickets, other pages) become links. `--links-only` asks for the entities alone, about a quarter of the output. Stored as a `reference_only` source, so it never overrides an authoritative fact. Results are saved every 128 nodes, so an interrupted run resumes where it stopped. | In the background, after ingestion (the daemon does it automatically) |
 
 Models are never used to search the graph.
+
+## Embeddings
+
+```toml
+[embeddings]
+backend = "hash"      # default: feature hashing, no model, no download
+# backend = "candle"  # a sentence-embedding model run in-process on the CPU
+# model = "BAAI/bge-small-en-v1.5"   # default sentence-transformers/all-MiniLM-L6-v2
+# backend = "ollama"  # an embedding model served by Ollama (default nomic-embed-text)
+```
+
+Each Candle model is used the way it was trained: sentence-transformers models are mean-pooled,
+BGE English models (`BAAI/bge-*-en*`) use the `[CLS]` state and prefix questions with their
+retrieval instruction, and E5 models (`intfloat/*e5*`) prefix `query: ` and `passage: `.
+`nomic-embed-text` through Ollama gets its task prefixes.
+
+With a neural model (Candle or Ollama), vector search is one of the rankings fused into the
+starting points of open questions (see [ARCHITECTURE.md](ARCHITECTURE.md#6-query-pipeline)).
+Hash vectors restate the full-text search, so they only add evidence at the end.
 
 To measure what they change, generate a question set with known answers and score it with and
 without a model configured:
@@ -100,6 +122,10 @@ recall, whether the top answer was right, latency per question, and model calls 
 `anchor ollama provision` uses the server at `ollama.base_url` if one answers. Otherwise it
 installs the official build into `data_dir/ollama` (user space, no sudo), starts it, pulls
 `ollama.default_model` and verifies a generation. An external server is never stopped or wiped.
+
+A managed server runs `ollama.num_parallel` requests at once (default 4) with a default context
+window of `ollama.context_tokens` (default 8,192), so its memory is bounded by their product.
+`OLLAMA_NUM_PARALLEL` or `OLLAMA_CONTEXT_LENGTH` in the environment take precedence.
 
 `anchor ollama rebuild` is the bootstrap resilience test: it wipes the managed installation and
 models, reinstalls, re-pulls and verifies, and prints per-phase timings. `--keep-binary` and

@@ -58,8 +58,9 @@ macro_rules! string_enum {
                 match s {
                     $( $text => Ok($name::$variant), )+
                     other => Err($crate::base::Error::Invalid(format!(
-                        concat!("unknown ", stringify!($name), " `{}`"),
-                        other
+                        concat!("unknown ", stringify!($name), " `{}`; expected one of: {}"),
+                        other,
+                        [$( $text ),+].join(", ")
                     ))),
                 }
             }

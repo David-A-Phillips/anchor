@@ -44,6 +44,8 @@ fn every_subcommand_is_listed_in_the_help() {
         "enrich",
         "eval",
         "why",
+        "impact",
+        "hotspots",
         "compare",
         "fetch",
         "fetch-atlassian",
@@ -161,10 +163,14 @@ fn spend_and_enrich_have_numeric_options_with_defaults() {
         panic!("not spend");
     };
     assert_eq!(days, 7);
-    let Command::Enrich { limit } = parse(&["enrich"]).command else {
+    let Command::Enrich { limit, links_only } = parse(&["enrich"]).command else {
         panic!("not enrich");
     };
-    assert_eq!(limit, 200);
+    assert_eq!((limit, links_only), (200, false));
+    let Command::Enrich { links_only, .. } = parse(&["enrich", "--links-only"]).command else {
+        panic!("not enrich");
+    };
+    assert!(links_only);
     assert!(!rejected(&["spend", "--days", "-1"]).is_empty());
     assert!(!rejected(&["spend", "--days", "many"]).is_empty());
     assert!(!rejected(&["enrich", "--limit", "x"]).is_empty());
@@ -184,6 +190,140 @@ fn eval_requires_the_truth_file() {
     };
     assert_eq!(truth, PathBuf::from("gt.json"));
     assert!(json && !local_only && !retrieval_only);
+}
+
+#[test]
+fn impact_takes_targets_a_diff_kinds_and_a_limit() {
+    let Command::Impact {
+        targets,
+        diff,
+        kinds,
+        limit,
+        json,
+        markdown,
+    } = parse(&[
+        "impact",
+        "src/a.rs",
+        "service:b",
+        "--kind",
+        "service",
+        "--kind",
+        "file",
+    ])
+    .command
+    else {
+        panic!("not impact");
+    };
+    assert_eq!(targets, ["src/a.rs", "service:b"]);
+    assert_eq!(diff, None);
+    assert_eq!(kinds, ["service", "file"]);
+    assert_eq!(limit, 50);
+    assert!(!json && !markdown);
+    let Command::Impact { targets, diff, .. } = parse(&["impact", "--diff"]).command else {
+        panic!("not impact");
+    };
+    assert!(targets.is_empty());
+    assert_eq!(diff.as_deref(), Some("HEAD"));
+    let Command::Impact {
+        diff, limit, json, ..
+    } = parse(&["impact", "--diff", "main", "--limit", "5", "--json"]).command
+    else {
+        panic!("not impact");
+    };
+    assert_eq!((diff.as_deref(), limit, json), (Some("main"), 5, true));
+    let Command::Impact { markdown, .. } =
+        parse(&["impact", "--diff", "origin/main", "--markdown"]).command
+    else {
+        panic!("not impact");
+    };
+    assert!(markdown);
+    assert!(
+        Cli::try_parse_from(["anchor", "impact", "x", "--json", "--markdown"]).is_err(),
+        "--json and --markdown conflict"
+    );
+}
+
+#[test]
+fn hotspots_defaults() {
+    let Command::Hotspots {
+        kind,
+        limit,
+        min_dependents,
+        json,
+    } = parse(&["hotspots"]).command
+    else {
+        panic!("not hotspots");
+    };
+    assert_eq!(
+        (kind.as_str(), limit, min_dependents, json),
+        ("service", 20, 1, false)
+    );
+    let Command::Hotspots { kind, .. } = parse(&["hotspots", "--kind", "file"]).command else {
+        panic!("not hotspots");
+    };
+    assert_eq!(kind, "file");
+}
+
+fn git(root: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        status.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+#[test]
+fn diff_targets_are_absolute_for_existing_files_and_source_relative_for_deleted_ones() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir");
+    std::fs::write(repo.join("src/a.rs"), "fn a() {}\n").expect("write");
+    std::fs::write(repo.join("src/b.rs"), "fn b() {}\n").expect("write");
+    std::fs::write(repo.join("README.md"), "hi\n").expect("write");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "start"]);
+
+    let mut config = AnchorConfig::default();
+    config.sources.push(crate::config::SourceConfig::new(
+        "repo",
+        SourceKind::Repo,
+        repo.to_string_lossy(),
+    ));
+    assert!(
+        changed_files("HEAD", &config, &repo)
+            .expect("diff")
+            .is_empty()
+    );
+
+    std::fs::write(repo.join("src/a.rs"), "fn a() { b() }\n").expect("write");
+    std::fs::remove_file(repo.join("src/b.rs")).expect("rm");
+    let mut found = changed_files("HEAD", &config, &repo.join("src")).expect("diff");
+    found.sort();
+    let a = repo.join("src/a.rs").canonicalize().expect("canonical");
+    assert_eq!(
+        found,
+        vec![a.to_string_lossy().into_owned(), "repo:src/b.rs".to_owned()]
+    );
+
+    assert!(changed_files("no-such-revision", &config, &repo).is_err());
+    assert!(
+        changed_files("HEAD", &config, dir.path()).is_err(),
+        "not a repository"
+    );
 }
 
 #[test]
@@ -362,12 +502,24 @@ fn mcp_serves_by_default_and_has_install_and_uninstall() {
 
 #[test]
 fn demo_scale_and_seed() {
-    let Command::Demo { out, scale, seed } = parse(&["demo", "--out", "d"]).command else {
+    let Command::Demo {
+        out,
+        scale,
+        seed,
+        no_history,
+    } = parse(&["demo", "--out", "d"]).command
+    else {
         panic!("not demo");
     };
     assert_eq!(out, PathBuf::from("d"));
     assert!(matches!(scale, DemoScale::Small));
     assert_eq!(seed, 1);
+    assert!(!no_history);
+    let Command::Demo { no_history, .. } = parse(&["demo", "--out", "d", "--no-history"]).command
+    else {
+        panic!("not demo");
+    };
+    assert!(no_history);
     let Command::Demo { scale, seed, .. } =
         parse(&["demo", "--out", "d", "--scale", "tiny", "--seed", "42"]).command
     else {

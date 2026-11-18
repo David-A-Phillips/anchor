@@ -37,9 +37,9 @@ the same contract.
 ```
 
 SQLite is the system of record. The in-memory graph is a compact index (ids, kinds, trust, weights)
-rebuilt from SQLite at start-up and kept in lockstep by applying every `GraphDelta` the store
-returns. Names, attributes and text live only in SQLite and are fetched for the handful of nodes
-that end up in an answer.
+kept in lockstep with it: the store applies every `GraphDelta` to the graph as part of the write
+that produced it (§4.7). Names, attributes and text live only in SQLite and are fetched for the
+handful of nodes that end up in an answer.
 
 ## 3. Module map
 
@@ -147,6 +147,14 @@ Materialised edges are unique per `(from, to, kind)`. Each unit asserting the ed
 (kept for provenance and attributes); the edge's trust is the greatest trust among its claims and
 its weight the greatest weight. The edge disappears with its last claim or either endpoint.
 
+**Derived links.** Some links need the whole corpus. After a full scan, `engine::title_links`
+matches every wiki page title (case-sensitive, on word boundaries, at least four characters,
+naming at most three pages) against the text of every other page and records the matches as
+`Mentions` edges in one `Links` unit per linking page, under the built-in `reference_only` source
+`anchor-title-links`. Enrichment (`anchor enrich`) records the entities a model names the same way
+under `anchor-enrichment`. Both are ordinary units: rebuilt as pages change, removed with them,
+and never able to override an authoritative fact.
+
 Conflicting facts are therefore distinct edges with distinct provenance — CODEOWNERS (SourceOfTruth)
 says team A owns the API, a stale wiki page (ReferenceOnly) says team B does — and are resolved at
 query time by trust-weighted traversal (§5), never by discarding data at ingestion.
@@ -180,11 +188,37 @@ Attribute names that drive behaviour are constants in `base::attrs`. In particul
   lookups), so wiki comments, tickets and API descriptions attach to code components and API
   definitions once those exist.
 
-### 4.7 `GraphDelta`
+### 4.7 `GraphDelta`, graph versions and consistent reads
 
 Every store mutation returns a `GraphDelta` (nodes upserted/removed, edges upserted/removed, by row
-id). The engine applies it to the in-memory graph and publishes it on the event bus. Application
-order: nodes upserted, edges removed, edges upserted, nodes removed.
+id). Application order: nodes upserted, edges removed, edges upserted, nodes removed.
+
+**Versions and the delta log.** A write that changes the graph increments the *graph version*
+(`graph_state`) and appends its encoded delta to `graph_log`, in the same transaction. The
+database also carries a random *epoch* that identifies its graph history.
+
+**The mirror.** The engine's `GraphStore` holds the shared in-memory graph as its *mirror*. A write
+takes the mirror's write lock before it commits and applies the delta before releasing it, so
+deltas reach the mirror in commit order and no reader ever sees the tables ahead of the graph. The
+graph is stamped with the epoch and version it reflects.
+
+**Consistent reads.** `GraphStore::consistent(f)` read-locks the mirror, then opens a SQLite read
+transaction on a connection pinned to the thread (`Db::snapshot_read`); every store read inside
+`f` sees that one snapshot, which is exactly the state the graph reflects. Query retrieval,
+`impact` and `hotspots` run this way. Writing inside `f` is an error, not a deadlock.
+
+**Other processes.** A daemon, an MCP server and a CLI command can share one database. When a
+consistent read finds the store's version ahead of its graph (another process wrote), it catches
+up first: it replays the logged deltas since its version, or rebuilds the graph from the tables
+when the epoch differs or the log no longer reaches back that far (`MAX_REPLAY`, or pruned).
+
+**The saved graph.** `graph.snapshot` in the data directory is the in-memory graph written to
+disk with its epoch and version (fixed-width binary, checksummed, written atomically). On open
+the engine loads it and catches up from the log as above; a missing, corrupt or foreign snapshot
+just means a rebuild. It is saved on `flush` (after ingest commands), by the daemon every 500
+versions, and after a start-up that had to replay or rebuild. Saving trims the log to the last
+1,000 entries behind the snapshot, so other processes can still replay. Deleting it is always
+safe.
 
 ## 5. Traversal and trust weighting
 
@@ -203,15 +237,44 @@ Pathfinding runs on the in-memory petgraph. Requirements:
   always wins a conflict, and reference material is used only when no authoritative path exists.
 * Searches are bounded by `max_hops` and `max_cost`, support multiple seeds, and return paths
   (node and edge sequences) so answers can cite their evidence.
+* Every search also has a budget: at most `graph.max_visits` settled nodes, and a deadline
+  (`query.timeout_ms` from the start of the question). A search that hits either stops, keeps
+  what it found, and marks the pathfinder `truncated`; responses carry `truncated: true` and a
+  `truncated` gap, so callers (agents especially) are never left waiting on a pathological
+  question. The MCP server additionally fails a read-only tool call that runs past three times
+  `query.timeout_ms` with an explanation.
 * Conflict resolution groups candidate answers to a single-valued question, picks the winner by the
   rule above and reports the overridden candidates with their provenance.
 
 ## 6. Query pipeline
 
+Questions about one entity go through the pipeline below. Two questions about the shape of the
+graph have their own entry points (`engine::impact`), on the same consistent reads and budgets:
+
+* **Impact** (`anchor impact`, MCP `impact`, `/api/impact`): many targets at once (files, symbols,
+  services, APIs; `--diff REV` takes the files changed in git) seed one search with the *impact*
+  profile: dependency edges backwards, implementation forwards to an API and on to its consumers,
+  and containment upwards to the enclosing file, service or API (never downwards, so siblings of a
+  changed file are not implicated). A file target also seeds the symbols it contains. Each
+  dependent keeps the cheapest path to its nearest target; owners of the targets and the listed
+  dependents are found with the ownership profile and grouped.
+* **Hotspots** (`anchor hotspots`, MCP `hotspots`, `/api/hotspots`): every dependency edge is lifted
+  to a granularity (service by default, or component, API, file, symbol) by climbing containment;
+  entities are ranked by distinct dependents, each with its nearest owner and risk flags
+  (`no_owner`, `single_person_owner`, `reference_only_owner`); owners are ranked by how many
+  entities they own directly.
+
 1. **System 1 (local, fast).** Intent parsing and query classification (`QueryIntent`: intent kind,
    entity mentions, target kinds, complexity), by the local model with a deterministic heuristic
    fallback. Initial graph filtering: entity mentions are resolved through the alias index,
    full-text search and the vector index into seed nodes, optionally re-ranked by the local model.
+   An *open* question (nothing resolved, no answer kind sought) starts instead from its searches
+   (`query::fusion`): node names, full text and, with a neural embedding model, vectors, merged
+   by reciprocal rank fusion; each of the five best candidates then passes part of its score
+   along its links, so a passage linked from a strong match can outrank a weak match (a
+   one-step personalised PageRank). That ranking leads the evidence. Questions seeking an answer
+   kind keep their best name matches as seeds in order, since the answer is the nearest such
+   node.
 2. **Traversal.** Trust-weighted search from the seeds with the profile for the intent; conflicts
    resolved; evidence paths and chunks assembled into a token-budgeted context bundle with a
    confidence score.
@@ -246,6 +309,9 @@ Pathfinding runs on the in-memory petgraph. Requirements:
 * One `Db` (`base::db`) shared by all modules: a single write connection plus pooled read-only
   connections, WAL mode. All `Db` methods block; from async code use the `*_async` variants or a
   dedicated thread. Never call a `Db` method inside a closure passed to another `Db` method.
+* Lock order is always the database connection first, then the in-memory graph. Code that holds
+  the graph lock must not wait on the write connection, and code inside
+  `GraphStore::consistent` must not lock the graph again.
 * Use `prepare_cached` on hot paths and batch writes in one transaction.
 * Row ids are local. Anything exported, hashed or synchronised uses natural keys.
 * Timestamps are `i64` milliseconds since the Unix epoch (`base::time::now_ms`).

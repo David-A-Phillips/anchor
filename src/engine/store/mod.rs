@@ -27,12 +27,14 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::base::model::graph_codec;
 use crate::base::{
     Attrs, ChunkId, ChunkKind, ContentHash, Db, EdgeAssertion, EdgeId, EdgeKind, Error, GraphDelta,
     GraphEdge, GraphNode, Hlc, Lookup, Migration, NodeId, NodeKey, NodeKind, NodeRef, Result,
     SourceDescriptor, SourceId, SourceKind, TrustLevel, Unit, UnitKey, UnitKind, UnitMeta,
     UnitVersion, attrs, keys,
 };
+use crate::engine::graph::{ContextGraph, SharedGraph};
 
 /// Maximum number of edge claims re-evaluated per changed name in one operation.
 pub const RELINK_LIMIT: usize = 500;
@@ -104,7 +106,141 @@ CREATE VIRTUAL TABLE nodes_fts USING fts5(name, content='nodes', content_rowid='
         name: "source depth",
         sql: "CREATE TABLE source_depth (source TEXT PRIMARY KEY, depth INTEGER NOT NULL) WITHOUT ROWID;",
     },
+    Migration {
+        version: 3,
+        name: "graph version and delta log",
+        sql: "
+CREATE TABLE graph_state (
+    id INTEGER PRIMARY KEY CHECK (id = 0), epoch TEXT NOT NULL, version INTEGER NOT NULL
+);
+INSERT INTO graph_state (id, epoch, version) VALUES (0, lower(hex(randomblob(16))), 0);
+CREATE TABLE graph_log (version INTEGER PRIMARY KEY, delta BLOB NOT NULL);
+",
+    },
 ];
+
+/// How many logged deltas a reader replays before rebuilding the graph from the tables instead.
+pub const MAX_REPLAY: u64 = 5_000;
+
+/// The graph as of one store version, read in one snapshot.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphImage {
+    /// Identity of the database's graph history; changes only with a new database.
+    pub epoch: String,
+    /// Graph version: incremented by every write that changes the graph.
+    pub version: u64,
+    /// Every node.
+    pub nodes: Vec<GraphNode>,
+    /// Every edge.
+    pub edges: Vec<GraphEdge>,
+}
+
+impl GraphImage {
+    /// The in-memory graph for this image, stamped with its epoch and version.
+    pub fn into_graph(self) -> ContextGraph {
+        let mut graph = ContextGraph::from_parts(self.nodes, self.edges);
+        graph.set_stamp(self.epoch, self.version);
+        graph
+    }
+}
+
+/// What [`GraphStore::catch_up`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CatchUp {
+    /// Logged deltas applied.
+    pub replayed: u64,
+    /// `true` when the graph was rebuilt from the tables (other epoch, or the log was pruned).
+    pub reloaded: bool,
+}
+
+fn graph_state(conn: &Connection) -> Result<(String, u64)> {
+    Ok(conn
+        .prepare_cached("SELECT epoch, version FROM graph_state WHERE id = 0")?
+        .query_row([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })?)
+}
+
+/// The logged deltas after `from` up to and including `to`; `None` when any is missing.
+fn log_between(conn: &Connection, from: u64, to: u64) -> Result<Option<Vec<GraphDelta>>> {
+    if to <= from {
+        return Ok(Some(Vec::new()));
+    }
+    let mut statement = conn.prepare_cached(
+        "SELECT version, delta FROM graph_log WHERE version > ?1 AND version <= ?2 ORDER BY version",
+    )?;
+    let rows = statement.query_map(params![from as i64, to as i64], |row| {
+        Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut out = Vec::new();
+    let mut expected = from + 1;
+    for row in rows {
+        let (version, bytes) = row?;
+        if version != expected {
+            return Ok(None);
+        }
+        out.push(graph_codec::decode_delta(&bytes)?);
+        expected += 1;
+    }
+    Ok((expected == to + 1).then_some(out))
+}
+
+fn graph_state_now(db: &Db) -> Result<(String, u64)> {
+    db.read(graph_state)
+}
+
+fn read_image(conn: &Connection) -> Result<GraphImage> {
+    let (epoch, version) = graph_state(conn)?;
+    let mut nodes = Vec::new();
+    let mut statement = conn.prepare_cached("SELECT id, kind, trust FROM nodes ORDER BY id")?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })? {
+        let (id, kind, trust) = row?;
+        if let Some(kind) = NodeKind::from_code(kind as u8) {
+            nodes.push(GraphNode {
+                id: NodeId(id),
+                kind,
+                trust: trust_of(trust),
+            });
+        }
+    }
+    let mut edges = Vec::new();
+    let mut statement = conn
+        .prepare_cached("SELECT id, from_id, to_id, kind, trust, weight FROM edges ORDER BY id")?;
+    for row in statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, f64>(5)?,
+        ))
+    })? {
+        let (id, from, to, kind, trust, weight) = row?;
+        if let Some(kind) = EdgeKind::from_code(kind as u8) {
+            edges.push(GraphEdge {
+                id: EdgeId(id),
+                from: NodeId(from),
+                to: NodeId(to),
+                kind,
+                trust: trust_of(trust),
+                weight: weight as f32,
+            });
+        }
+    }
+    Ok(GraphImage {
+        epoch,
+        version,
+        nodes,
+        edges,
+    })
+}
 
 /// What a write did.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -280,9 +416,14 @@ pub type Snapshot = (
 );
 
 /// The graph store. Cheap to clone.
+///
+/// A store can carry a *mirror*: the shared in-memory graph. Every write then applies its delta
+/// to the mirror while still holding the write lock, in commit order, and
+/// [`GraphStore::consistent`] gives readers the mirror and the tables at the same version.
 #[derive(Clone, Debug)]
 pub struct GraphStore {
     db: Db,
+    mirror: Option<SharedGraph>,
 }
 
 fn json<T: Serialize>(value: &T) -> Result<String> {
@@ -1158,7 +1299,18 @@ fn read_meta(tx: &Connection, key: &UnitKey) -> Result<Option<UnitMeta>> {
 impl GraphStore {
     /// Opens the store on a database whose schema includes [`MIGRATIONS`].
     pub fn new(db: Db) -> Result<Self> {
-        Ok(Self { db })
+        Ok(Self { db, mirror: None })
+    }
+
+    /// The same store, keeping `graph` in lockstep with every write from now on.
+    pub fn with_mirror(mut self, graph: SharedGraph) -> Self {
+        self.mirror = Some(graph);
+        self
+    }
+
+    /// The in-memory graph kept in lockstep with this store, if any.
+    pub fn mirror(&self) -> Option<&SharedGraph> {
+        self.mirror.as_ref()
     }
 
     /// The underlying database handle.
@@ -1166,15 +1318,201 @@ impl GraphStore {
         &self.db
     }
 
+    /// Runs one write transaction. When the graph changes, the version is incremented and the
+    /// delta logged in the same transaction; the mirror is locked before the commit and updated
+    /// before the lock is released, so no reader ever sees the tables and the mirror disagree.
     fn write(
         &self,
         f: impl FnOnce(&Transaction<'_>, &mut Touched) -> Result<bool>,
     ) -> Result<ApplyOutcome> {
-        self.db.transaction(|tx| {
+        self.db.write(|conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let mut touched = Touched::default();
-            let changed = f(tx, &mut touched)?;
-            touched.finish(tx, changed)
+            let changed = f(&tx, &mut touched)?;
+            let outcome = touched.finish(&tx, changed)?;
+            if outcome.delta.is_empty() {
+                tx.commit()?;
+                return Ok(outcome);
+            }
+            let version: i64 = tx
+                .prepare_cached(
+                    "UPDATE graph_state SET version = version + 1 WHERE id = 0 RETURNING version",
+                )?
+                .query_row([], |row| row.get(0))?;
+            tx.prepare_cached("INSERT INTO graph_log (version, delta) VALUES (?1, ?2)")?
+                .execute(params![version, graph_codec::encode_delta(&outcome.delta)])?;
+            match &self.mirror {
+                Some(mirror) => {
+                    let (epoch, _) = graph_state(&tx)?;
+                    let version = version as u64;
+                    let mut graph = mirror.write();
+                    // Usually the mirror is exactly one version behind. When another process
+                    // wrote in between, bring it up to date from the log (or the tables) first;
+                    // the reads go through this transaction, so they need no other lock.
+                    let (have_epoch, have) = graph.stamp();
+                    let earlier = if have_epoch == epoch && have + 1 == version {
+                        Some(Vec::new())
+                    } else if have_epoch == epoch && have < version && version - have <= MAX_REPLAY
+                    {
+                        log_between(&tx, have, version - 1)?
+                    } else {
+                        None
+                    };
+                    match earlier {
+                        Some(earlier) => {
+                            tx.commit()?;
+                            for delta in &earlier {
+                                graph.apply(delta);
+                            }
+                            graph.apply(&outcome.delta);
+                        }
+                        None => {
+                            let image = read_image(&tx)?;
+                            tx.commit()?;
+                            *graph = image.into_graph();
+                        }
+                    }
+                    graph.set_stamp(epoch, version);
+                }
+                None => tx.commit()?,
+            }
+            Ok(outcome)
         })
+    }
+
+    /// The store's current graph epoch and version.
+    pub fn graph_version(&self) -> Result<(String, u64)> {
+        self.db.read(graph_state)
+    }
+
+    /// The whole graph as of one version, read in a single snapshot.
+    pub fn graph_image(&self) -> Result<GraphImage> {
+        self.db.snapshot_read(|| self.db.read(read_image))
+    }
+
+    /// The logged deltas after `from` up to and including `to`, in order; `None` when the log
+    /// no longer holds all of them.
+    pub fn deltas_between(&self, from: u64, to: u64) -> Result<Option<Vec<GraphDelta>>> {
+        if to <= from {
+            return Ok(Some(Vec::new()));
+        }
+        self.db.read(|conn| log_between(conn, from, to))
+    }
+
+    /// Forgets logged deltas up to and including `version` (they are in a saved snapshot).
+    pub fn prune_graph_log(&self, version: u64) -> Result<usize> {
+        self.db.write(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM graph_log WHERE version <= ?1",
+                [version as i64],
+            )?)
+        })
+    }
+
+    /// Number of deltas currently in the log.
+    pub fn graph_log_len(&self) -> Result<u64> {
+        self.db.read(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM graph_log", [], |row| {
+                row.get::<_, i64>(0)
+            })? as u64)
+        })
+    }
+
+    /// Brings `graph` up to the store's current version: replays logged deltas when the log
+    /// reaches back to the graph's version, and rebuilds it from the tables otherwise.
+    pub fn catch_up_graph(&self, graph: &SharedGraph) -> Result<CatchUp> {
+        // Reading happens before the graph lock is taken (writers take the database first and
+        // the graph second), and the result is applied only if the graph has not moved since.
+        for _ in 0..4 {
+            let (epoch, version) = self.graph_version()?;
+            let (have_epoch, have_version) = {
+                let graph = graph.read();
+                let (e, v) = graph.stamp();
+                (e.to_owned(), v)
+            };
+            if have_epoch == epoch && have_version >= version {
+                return Ok(CatchUp::default());
+            }
+            let deltas = if have_epoch == epoch && version - have_version <= MAX_REPLAY {
+                self.deltas_between(have_version, version)?
+            } else {
+                None
+            };
+            match deltas {
+                Some(deltas) => {
+                    let mut live = graph.write();
+                    if live.stamp() != (have_epoch.as_str(), have_version) {
+                        continue;
+                    }
+                    for delta in &deltas {
+                        live.apply(delta);
+                    }
+                    live.set_stamp(epoch, version);
+                    return Ok(CatchUp {
+                        replayed: deltas.len() as u64,
+                        reloaded: false,
+                    });
+                }
+                None => {
+                    let image = self.graph_image()?;
+                    let mut live = graph.write();
+                    if live.stamp() != (have_epoch.as_str(), have_version) {
+                        continue;
+                    }
+                    *live = image.into_graph();
+                    return Ok(CatchUp {
+                        replayed: 0,
+                        reloaded: true,
+                    });
+                }
+            }
+        }
+        Err(Error::other(
+            "the graph kept changing while catching up; try again",
+        ))
+    }
+
+    /// Catches the mirror up with the store (see [`Self::catch_up_graph`]). A no-op without one.
+    pub fn catch_up(&self) -> Result<CatchUp> {
+        match &self.mirror {
+            Some(mirror) => self.catch_up_graph(mirror),
+            None => Ok(CatchUp::default()),
+        }
+    }
+
+    /// Runs `f` against the mirror and the tables at one and the same version: the mirror is
+    /// read-locked, every store read made by `f` on this thread sees one database snapshot, and
+    /// that snapshot is the state the mirror reflects. A mirror that is behind (writes by another
+    /// process) is caught up first. `f` must not write, and must not lock the mirror again.
+    pub fn consistent<T>(&self, f: impl FnOnce(&ContextGraph) -> Result<T>) -> Result<T> {
+        let Some(mirror) = &self.mirror else {
+            return Err(Error::other(
+                "consistent reads need a store with a mirrored graph",
+            ));
+        };
+        let mut f = Some(f);
+        for attempt in 0..3 {
+            let done = self.db.snapshot_read(|| {
+                let graph = mirror.read();
+                // The first statement of the transaction fixes the snapshot, after the graph
+                // lock: no write can commit between the two.
+                let (epoch, version) = graph_state_now(&self.db)?;
+                if graph.stamp() != (epoch.as_str(), version) && attempt < 2 {
+                    return Ok(None);
+                }
+                match f.take() {
+                    Some(f) => f(&graph).map(Some),
+                    None => Err(Error::other("consistent read ran twice")),
+                }
+            })?;
+            match done {
+                Some(value) => return Ok(value),
+                None => {
+                    self.catch_up_graph(mirror)?;
+                }
+            }
+        }
+        Err(Error::other("consistent read did not converge"))
     }
 
     /// Registers a source or updates it. Changing the trust level re-weights everything the
@@ -1433,37 +1771,8 @@ impl GraphStore {
 
     /// All nodes and edges, for building the in-memory graph.
     pub fn load_graph(&self) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
-        self.db.read(|conn| {
-            let mut nodes = Vec::new();
-            let mut statement = conn.prepare("SELECT id, kind, trust FROM nodes ORDER BY id")?;
-            for row in statement.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })? {
-                let (id, kind, trust) = row?;
-                if let Some(kind) = NodeKind::from_code(kind as u8) {
-                    nodes.push(GraphNode {
-                        id: NodeId(id),
-                        kind,
-                        trust: trust_of(trust),
-                    });
-                }
-            }
-            let mut edges = Vec::new();
-            let mut statement = conn.prepare("SELECT id FROM edges ORDER BY id")?;
-            let ids: Vec<i64> = statement
-                .query_map([], |row| row.get(0))?
-                .collect::<std::result::Result<_, _>>()?;
-            for id in ids {
-                if let Some(edge) = read_graph_edge(conn, id)? {
-                    edges.push(edge);
-                }
-            }
-            Ok((nodes, edges))
-        })
+        let image = self.graph_image()?;
+        Ok((image.nodes, image.edges))
     }
 
     fn node_record(conn: &Connection, id: i64) -> Result<Option<NodeRecord>> {
@@ -1538,6 +1847,26 @@ impl GraphStore {
             for id in ids {
                 if let Some(record) = Self::node_record(conn, id.0)? {
                     out.push(record);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Key and display name of each node that exists, cheaper than [`Self::nodes`] when only
+    /// those are needed.
+    pub fn names(&self, ids: &[NodeId]) -> Result<HashMap<NodeId, (NodeKey, String)>> {
+        self.db.read(|conn| {
+            let mut statement = conn.prepare_cached("SELECT key, name FROM nodes WHERE id = ?1")?;
+            let mut out = HashMap::with_capacity(ids.len());
+            for id in ids {
+                if let Some((key, name)) = statement
+                    .query_row([id.0], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .optional()?
+                {
+                    out.insert(*id, (NodeKey::new(key), name));
                 }
             }
             Ok(out)
@@ -1925,7 +2254,8 @@ impl GraphStore {
             }
             Ok(out)
         })?;
-        self.db.transaction(|tx| {
+        self.db.write(|conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(
                 "DELETE FROM nodes; DELETE FROM node_keys; DELETE FROM node_claims; DELETE FROM aliases;
                  DELETE FROM edges; DELETE FROM edge_claims; DELETE FROM refs; DELETE FROM chunks;
@@ -1936,9 +2266,22 @@ impl GraphStore {
             let mut touched = Touched::default();
             for (unit, version) in &units {
                 let hash = unit.content_hash()?;
-                write_unit(tx, &mut touched, unit, hash, version)?;
+                write_unit(&tx, &mut touched, unit, hash, version)?;
             }
-            relink(tx, &mut touched)?;
+            relink(&tx, &mut touched)?;
+            // Row ids changed wholesale: no logged delta leads here, so readers reload.
+            tx.execute_batch(
+                "UPDATE graph_state SET version = version + 1 WHERE id = 0; DELETE FROM graph_log;",
+            )?;
+            match &self.mirror {
+                Some(mirror) => {
+                    let image = read_image(&tx)?;
+                    let mut graph = mirror.write();
+                    tx.commit()?;
+                    *graph = image.into_graph();
+                }
+                None => tx.commit()?,
+            }
             Ok(())
         })
     }

@@ -36,5 +36,5 @@ max_commits = 2000            # most recent commits per repository; older ones a
 max_files_per_commit = 30     # larger commits keep the count, not the file links
 ```
 
-For the trail to reach reviews and tickets, ingest them too: `anchor fetch David-A-Phillips/REPO` for GitHub
+For the trail to reach reviews and tickets, ingest them too: `anchor fetch OWNER/REPO` for GitHub
 pull requests, a `jira` source or `anchor fetch-atlassian` for tickets and wiki pages.

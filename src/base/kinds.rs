@@ -289,6 +289,8 @@ string_enum! {
         Enrichment = 9 => "enrichment",
         /// One commit of a repository's history.
         Commit = 10 => "commit",
+        /// Links from one page to the pages whose titles it names.
+        Links = 11 => "links",
     }
 }
 

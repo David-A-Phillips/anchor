@@ -1,7 +1,15 @@
 # Benchmarks
 
-How Anchor compares with other retrieval systems on the same corpus and the same questions, how
-the numbers were produced, and what they do and do not show.
+How Anchor compares with other retrieval systems, how the numbers were produced, and what they
+do and do not show. There are two kinds of benchmark here:
+
+- **Anchor's own corpus** (most of this page): a generated organisation with code, an org chart,
+  wikis, tickets and reviews, and 735 questions with known answers. It measures what Anchor is
+  for, and it was built by the same project, so it favours Anchor.
+- **[Standard multi-hop benchmarks](#standard-multi-hop-benchmarks)**: MuSiQue, 2WikiMultiHopQA
+  and HotpotQA, the passage-retrieval sets graph-RAG papers publish scores on. Neither the data
+  nor the questions were chosen by this project; three ranking constants were chosen on the
+  first 300 questions of each, and the remaining 700 are reported separately.
 
 Everything here can be reproduced with `anchor compare` and the scripts in
 [`scripts/compare/`](../scripts/compare). Read the [caveats](#caveats) before quoting a number.
@@ -14,7 +22,7 @@ system's retrieved context, on a 131-question sample.
 
 | System | Answer in retrieved context | Reader answers correctly | Tokens per question | Query time |
 |---|---|---|---|---|
-| **Anchor** | **0.99** | **0.85** | 1,286 | 6 ms |
+| **Anchor** | **0.99** | **0.85**\* | 1,287 | 4 ms |
 | LlamaIndex hybrid (vector + BM25) | 0.89 | 0.49 | 3,100 | 30–50 ms |
 | LlamaIndex BM25 | 0.85 | 0.44 | 3,646 | 0.6 ms |
 | LlamaIndex vector | 0.64 | 0.41 | 2,125 | 30–75 ms |
@@ -26,10 +34,16 @@ system's retrieved context, on a 131-question sample.
 
 | System | Index on disk | Peak memory | Indexing time |
 |---|---|---|---|
-| **Anchor** | 12.7 MB | 192 MB | 1.8 s |
+| **Anchor** | 12.7 MB | 164 MB | 1.1 s |
 | LangChain (FAISS + BM25) | 8.7 MB | 200 MB | 24–43 s |
 | LlamaIndex (vector + BM25) | 16.5 MB | 323 MB | 18–27 s |
 | LightRAG | 54.3 MB | 1,067 MB | about 1 h 40 min |
+
+\* Retrieval figures, footprint and query times were rerun for 0.1.2. The reader-model figures
+for Anchor are from the 0.1.1 run: 0.1.2 labels an ownership question's secondary candidates (the
+team owning the enclosing component, the domain lead) as evidence instead of answers, which
+changed Anchor's context text for 40 of the 131 sample questions, and the shared reader has not
+been rerun on them yet. The other systems' contexts did not change.
 
 The LangChain, LlamaIndex and LightRAG rows leave out the models they call, which run in a
 separate Ollama server: the embedding model (`nomic-embed-text`, 274 MB on disk) for all three,
@@ -71,7 +85,7 @@ win rates. The quality metrics they define, computed on this run:
 
 | System | Hit rate | MRR | Precision | nDCG | Context precision |
 |---|---|---|---|---|---|
-| Anchor | 0.99 | 0.93 | 0.16 | 0.91 | 0.85 |
+| Anchor | 0.99 | 0.93 | 0.16 | 0.91 | 0.84 |
 | LlamaIndex hybrid | 0.89 | 0.45 | 0.12 | 0.54 | 0.40 |
 | LlamaIndex BM25 | 0.85 | 0.57 | 0.12 | 0.61 | 0.50 |
 | LlamaIndex vector | 0.64 | 0.34 | 0.08 | 0.40 | 0.31 |
@@ -173,7 +187,7 @@ expected answer is known exactly:
 ## Reproducing
 
 ```sh
-anchor demo --out corpus/compare/data --scale medium --seed 7
+anchor demo --out corpus/compare/data --scale medium --seed 7 --no-history
 mv corpus/compare/data/anchor.toml corpus/compare/data/ground_truth.json corpus/compare/
 # edit data_dir in corpus/compare/anchor.toml, then:
 anchor --config corpus/compare/anchor.toml compare corpus/compare/run \
@@ -210,9 +224,14 @@ it:
 | After relation chains, scoped names and dismissal reasons | 0.99 | 0.99 |
 | Prose questions added (78), before changes | 0.85 on prose | none |
 | After quoting documentation pages for the named entity | 0.99 on prose | none |
+| 0.1.2: secondary ownership candidates labelled as evidence | 0.99 (unchanged) | unchanged |
 
 A second corpus generated with a different seed and never inspected during that work scores the
 same (0.99 / 0.98 on the first three question types).
+
+The 0.1.2 relabelling raised the share of answer-labelled items that are correct owners in the
+key-based test (`tests/e2e.rs`) from 0.23 to 0.91, with recall unchanged at 1.00. It does not
+move the text-based scores above, which look for the answer anywhere in the context.
 
 **System 1 enrichment** (summaries, tags and "questions this text answers", written at ingestion
 by `llama3.2:3b`) made no measurable difference: enriching all 276 pages, tickets, pull requests
@@ -261,6 +280,127 @@ From `cargo test --test performance -- --nocapture` and manual runs on the same 
   frameworks are almost entirely embedding calls and vary with GPU load.
 - **One machine, one run each.** No confidence intervals.
 
-The fair next test is a set of questions written by people who did not build Anchor, against
-real repositories, wikis and trackers. The harness accepts hand-written questions and any system
-that writes a results file.
+The [standard multi-hop benchmarks](#standard-multi-hop-benchmarks) below are the independent
+check. The fair next test beyond that is a set of questions written by people who did not build
+Anchor, against real repositories, wikis and trackers. The harness accepts hand-written
+questions and any system that writes a results file.
+
+## Change impact
+
+`anchor impact` and `anchor hotspots`, scored against the same corpus's ground truth
+(`--scale medium --seed 7`, no models). Reproduce with
+`ANCHOR_IMPACT_SCALE=medium ANCHOR_IMPACT_SEED=7 cargo test --release --test impact scores -- --nocapture`.
+
+| Check | Result |
+|---|---|
+| A change to an API reaches every service that consumes it (recall) | 1.00 (125/125) |
+| Services reported as consuming it directly are consumers (precision) | 1.00 (125/125) |
+| The owner reported for a changed API or service is its owner | 1.00 (129/129) |
+| Services flagged "single-person owner" are exactly those a person owns (precision / recall) | 1.00 / 1.00 (16) |
+| Time per impact query, p95 | 0.3 ms |
+
+The ground truth comes from the generator that also builds the graph, so this checks that impact
+follows the relationships correctly; it says nothing about how complete those relationships are
+in a real organisation's data.
+
+## Standard multi-hop benchmarks
+
+The passage-retrieval benchmark graph-RAG papers report: for each question, the share of its
+gold supporting passages among the first 2 and first 5 retrieved (recall@2, recall@5), averaged
+over 1,000 questions per dataset. Data: the release used by HippoRAG 2
+([`osunlp/HippoRAG_2`](https://huggingface.co/datasets/osunlp/HippoRAG_2)): 1,000 questions each
+from MuSiQue, 2WikiMultiHopQA and HotpotQA, and corpora of 11,656, 6,119 and 9,811 Wikipedia
+passages (the gold and distractor passages of all the questions).
+
+| System | MuSiQue | 2Wiki | HotpotQA | Average |
+|---|---|---|---|---|
+| **Anchor** (no model, default configuration) | 30.0 / 44.0 | 60.6 / 85.6 | 52.6 / 75.2 | 47.7 / 68.3 |
+| Anchor 0.1.1 | 26.9 / 42.6 | 60.5 / 66.7 | 44.6 / 68.8 | 44.0 / 59.4 |
+| BM25, this harness | 34.1 / 44.6 | 55.5 / 65.8 | 56.1 / 72.8 | 48.6 / 61.1 |
+| *Published (HippoRAG 2 paper, Table 9):* | | | | |
+| BM25 | 32.4 / 43.5 | 55.3 / 65.3 | 57.3 / 74.8 | 48.3 / 61.2 |
+| Contriever | 34.8 / 46.6 | 46.6 / 57.5 | 58.4 / 75.3 | 46.6 / 59.8 |
+| GTR (T5-base) | 37.4 / 49.1 | 60.2 / 67.9 | 59.3 / 73.9 | 52.3 / 63.6 |
+| NV-Embed-v2 (7B) | 52.7 / 69.7 | 67.1 / 76.5 | 84.1 / 94.5 | 68.0 / 80.2 |
+| RAPTOR (Llama-3.3-70B) | 47.0 / 57.8 | 58.3 / 66.2 | 76.8 / 86.9 | 60.7 / 70.3 |
+| HippoRAG (Llama-3.3-70B) | 41.2 / 53.2 | 71.9 / 90.4 | 60.4 / 77.3 | 57.8 / 73.6 |
+| HippoRAG 2 (Llama-3.3-70B) | 56.1 / 74.7 | 76.2 / 90.4 | 83.5 / 96.3 | 71.9 / 87.1 |
+
+Recall@2 / recall@5, in percent. Published rows are from Gutiérrez et al., *From RAG to Memory:
+Non-Parametric Continual Learning for Large Language Models* (ICML 2025, arXiv 2502.14802v2),
+Table 9; the averages here are over these three datasets only. GraphRAG and LightRAG are not in
+that table because they do not return ranked passages. Recall@10 for Anchor: 54.1, 94.6 and 86.8
+(BM25: 52.2, 70.5, 86.2).
+
+**What it shows.** Without any model, Anchor's average recall@5 (68.3) is above BM25's (61.1)
+and the small dense retrievers' (59.8, 63.6). Per dataset, it is far ahead on 2WikiMultiHopQA,
+within five points of HippoRAG (which builds its graph with a 70B model), level with BM25 and the
+dense retrievers on HotpotQA, and level with BM25 but below them on MuSiQue. It remains well below
+HippoRAG 2 and a 7B embedding model on MuSiQue and HotpotQA, and its recall@2 is below BM25's on
+those two: the passage that shares the question's words is usually found, the second hop is less
+often ranked first.
+
+**Where the gain comes from.** Wikipedia passages carry no owners, imports or explicit links, so
+until this release Anchor's graph over them had nodes and no edges, and retrieval was its
+full-text search. Two changes, each measured on its own:
+
+| Change | MuSiQue | 2Wiki | HotpotQA |
+|---|---|---|---|
+| 0.1.1 | 26.9 / 42.6 | 60.5 / 66.7 | 44.6 / 68.8 |
+| Ranking: fused search, relevance spread along links | 32.6 / 43.0 | 59.6 / 66.3 | 50.4 / 67.6 |
+| ... and pages linked by the titles they name | 30.0 / 44.0 | 60.6 / 85.6 | 52.6 / 75.2 |
+
+- **Title links** (`graph.title_links`, on by default). After a full scan, every wiki page title
+  is matched, case-sensitively and on word boundaries, against the text of every other page, and
+  each match becomes a `Mentions` link. This needs no model and takes 0.5 to 1.8 seconds per
+  corpus; it finds 2,120 links in 2WikiMultiHopQA, 4,867 in HotpotQA and 13,270 in MuSiQue.
+- **Ranking for open questions.** When a question names nothing Anchor can resolve and asks for
+  no particular kind of answer, the node-name, full-text and (with a neural embedding model)
+  vector searches are merged by reciprocal rank fusion, and each of the five best candidates
+  passes three quarters of its score along its links: a one-step, personalised PageRank. Without
+  links this mostly reorders the top of the list (recall@2 up, recall@5 level); with links, the
+  second passage of a two-hop question comes into the top five.
+
+Questions about owners, dependencies and the other answer kinds keep their previous seeding; on
+the synthetic benchmark above every context and every answer is identical before and after.
+
+**Models.** A local model can also find the links: with `llama3.1:8b` naming the entities each
+passage refers to (`anchor enrich`), 2WikiMultiHopQA recall@5 rose from 66.7 to 78.2 under the
+0.1.1 ranking. Keeping the model's summaries but deleting its links gave 66.0, so the links did
+all of it; on that dataset exact titles find as many. Runs with model links, a neural embedding
+model and both on all three datasets, under the new ranking, are prepared but not yet run.
+
+**Method.** `scripts/bench/multihop.py` writes each passage to a Markdown file (`# title`, then
+the text), ingests them as one wiki source with the default configuration and no model, and asks
+every question with `anchor query --retrieval-only`. A passage's rank is the position of its page
+among the returned items. The three ranking constants (`RRF_K` 10, `SPREAD` 0.75, `SPREAD_FROM`
+5 in `src/engine/query/fusion.rs`) were chosen from eight settings on the first 300 questions of
+each dataset; on the other 700 alone, Anchor scores 30.5 / 44.9, 60.7 / 85.2 and 52.3 / 74.1
+(BM25: 35.0 / 45.7, 55.1 / 65.0, 56.2 / 72.6), in line with the full sets. The same script scores
+an Okapi BM25 (k1 1.5, b 0.75) over the same passages, which reproduces the published BM25 figures
+to within two points: a check that the corpus, gold passages and scoring match the papers'. A
+question takes about 18 ms including process start; 3,000 take under half a minute with eight
+parallel processes.
+
+**Caveats.** Recall measures retrieval only, not answers. The published rows were run by the
+paper's authors on their hardware with their implementation; only the two BM25 rows were run here.
+Title links help most where pages are named by their exact titles, as in Wikipedia and in many
+engineering wikis; MuSiQue's questions and passages often use other names, and gain little.
+
+Reproduce:
+
+```sh
+mkdir -p data/hippo && cd data/hippo
+for f in musique 2wikimultihopqa hotpotqa; do
+  curl -LO https://huggingface.co/datasets/osunlp/HippoRAG_2/resolve/main/$f.json
+  curl -LO https://huggingface.co/datasets/osunlp/HippoRAG_2/resolve/main/${f}_corpus.json
+done
+cd -
+python scripts/bench/multihop.py prepare data/hippo corpus/multihop
+for f in musique 2wikimultihopqa hotpotqa; do
+  anchor --config corpus/multihop/$f/anchor.toml ingest
+done
+python scripts/bench/multihop.py run data/hippo corpus/multihop --anchor target/release/anchor
+python scripts/bench/multihop.py run data/hippo corpus/multihop --anchor target/release/anchor \
+    --offset 300    # the questions not used to choose the ranking constants
+```

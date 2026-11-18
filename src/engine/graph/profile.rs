@@ -234,6 +234,34 @@ impl TraversalProfile {
         .allow_both(EdgeKind::Implements, 1.0)
     }
 
+    /// "What could break if this changes?": walks dependency edges backwards (from what is used
+    /// to what uses it), from an implementation to the API it implements and on to that API's
+    /// consumers, and up containment to the enclosing file, service or API (not to components
+    /// and domains, which group services without using them) so that dependents of the
+    /// enclosing service count too. Never walks down containment, so a change to one file does
+    /// not implicate its siblings.
+    pub fn impact() -> Self {
+        use Direction::{Forward, Reverse};
+        [
+            EdgeKind::Calls,
+            EdgeKind::References,
+            EdgeKind::Imports,
+            EdgeKind::DependsOn,
+            EdgeKind::Consumes,
+        ]
+        .into_iter()
+        .fold(Self::new(), |profile, kind| {
+            profile.allow(kind, Reverse, 1.0)
+        })
+        .allow(EdgeKind::Implements, Forward, 0.5)
+        .allow_into(
+            EdgeKind::Contains,
+            Reverse,
+            0.5,
+            &[NodeKind::File, NodeKind::Service, NodeKind::ApiSpec],
+        )
+    }
+
     /// "Where / how is this defined?": containment, documentation, implementation, and mentions as
     /// weak evidence.
     pub fn definition() -> Self {

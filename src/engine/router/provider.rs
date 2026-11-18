@@ -140,7 +140,9 @@ pub fn build_tier(
                 .as_deref()
                 .unwrap_or(crate::ollama::DEFAULT_BASE_URL);
             handle(
-                OllamaModel::new(tier, base, &config.model)?.with_timeout(timeout),
+                OllamaModel::new(tier, base, &config.model)?
+                    .with_timeout(timeout)
+                    .with_context_tokens(Some(config.context_tokens)),
                 config,
             )
         }

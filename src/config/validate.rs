@@ -501,6 +501,15 @@ impl AnchorConfig {
         if self.graph.max_hops == 0 {
             report.error("graph.max_hops", "must be at least 1");
         }
+        if self.graph.max_visits == 0 {
+            report.error("graph.max_visits", "must be at least 1");
+        }
+        if self.query.timeout_ms == 0 {
+            report.warning(
+                "query.timeout_ms",
+                "0 disables the time budget: a pathological question can keep an agent waiting",
+            );
+        }
         unit_range(
             report,
             "query.confidence_threshold",
@@ -729,6 +738,8 @@ mod tests {
         config.graph.trust.source_of_truth_multiplier = 0.0;
         config.graph.trust.reference_only_multiplier = -1.0;
         config.graph.max_hops = 0;
+        config.graph.max_visits = 0;
+        config.query.timeout_ms = 0;
         config.query.confidence_threshold = -0.1;
         config.query.top_k = 0;
         config.embeddings.dimensions = 0;
@@ -739,6 +750,7 @@ mod tests {
             "graph.trust.source_of_truth_multiplier",
             "graph.trust.reference_only_multiplier",
             "graph.max_hops",
+            "graph.max_visits",
             "query.confidence_threshold",
             "query.top_k",
             "embeddings.dimensions",
@@ -747,5 +759,10 @@ mod tests {
         ] {
             assert!(has(&report.errors, path), "{path}: {:?}", report.errors);
         }
+        assert!(has(&report.warnings, "query.timeout_ms"));
+        assert!(!has(
+            &AnchorConfig::default().validate().warnings,
+            "query.timeout_ms"
+        ));
     }
 }

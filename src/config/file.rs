@@ -21,8 +21,20 @@ pub fn process_env(name: &str) -> Option<OsString> {
 }
 
 /// Header written at the top of every saved configuration file.
-const HEADER: &str = "# Anchor configuration. Managed by `anchor setup`; safe to edit by hand.\n\
+const HEADER: &str = "# Anchor configuration, written by `anchor init`, `anchor setup` and `anchor source add`; safe to\n# edit by hand. Every setting is optional: what is left out takes its default.\n\
 # Secrets never live here: API keys and tokens are read from the environment variables named below.\n\n";
+
+/// Appended while no source is configured, so the first one can be added by uncommenting.
+const SOURCES_EXAMPLE: &str = "
+# Sources: what Anchor indexes. `anchor source add <path>` adds one for you (it infers the kind
+# and trust level); or uncomment and edit:
+#
+# [[sources]]
+# id = \"payments-api\"
+# kind = \"repo\"                  # repo | wiki | api_portal | jira | org_model | code_review | issues
+# trust = \"source_of_truth\"      # or reference_only (wikis, tickets, discussions)
+# location = \"/path/to/payments-api\"
+";
 
 /// A configuration file read from disk together with what was noticed while reading it.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,7 +81,7 @@ impl AnchorConfig {
             ))
         })?;
         let config = Self::from_toml_str(&text)
-            .map_err(|err| Error::config(format!("{}: {err}", path.display())))?;
+            .map_err(|err| Error::config(format!("{}: {}", path.display(), err.detail())))?;
         let unknown_keys = Self::unknown_keys(&text);
         Ok(LoadedConfig {
             config,
@@ -95,7 +107,10 @@ impl AnchorConfig {
     /// directory, which is then renamed over the destination, so a crash never leaves a truncated
     /// configuration. Parent directories are created.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let text = format!("{HEADER}{}", self.to_toml_string()?);
+        let mut text = format!("{HEADER}{}", self.to_toml_string()?);
+        if self.sources.is_empty() {
+            text.push_str(SOURCES_EXAMPLE);
+        }
         let parent = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
@@ -118,9 +133,15 @@ impl AnchorConfig {
         let Ok(actual) = text.parse::<toml::Table>() else {
             return Vec::new();
         };
-        let Ok(schema) = toml::Table::try_from(schema_exemplar()) else {
+        let Ok(mut schema) = toml::Table::try_from(schema_exemplar()) else {
             return Vec::new();
         };
+        // Lists left empty in the exemplar are not serialised, but their keys are valid.
+        for key in ["sources", "github", "atlassian"] {
+            schema
+                .entry(key)
+                .or_insert_with(|| toml::Value::Array(Vec::new()));
+        }
         let mut issues = Vec::new();
         diff_tables(&actual, &schema, "", &mut issues);
         issues
@@ -344,6 +365,20 @@ mod tests {
         std::fs::write(&missing, "mode = [").expect("write");
         let err = AnchorConfig::load_or_default(&missing).expect_err("malformed");
         assert!(err.to_string().contains("anchor.toml"), "{err}");
+    }
+
+    #[test]
+    fn list_sections_are_known_keys_even_when_empty_in_the_defaults() {
+        let text = "[[github]]\nrepository = \"o/r\"\n\n[[atlassian]]\nbase_url = \"https://x.atlassian.net\"\n";
+        let issues = AnchorConfig::unknown_keys(text);
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue.path == "github" || issue.path == "atlassian"),
+            "{issues:?}"
+        );
+        let saved = AnchorConfig::default().to_toml_string().unwrap();
+        assert!(!saved.contains("sources = []"), "{saved}");
     }
 
     #[test]

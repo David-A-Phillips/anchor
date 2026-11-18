@@ -836,24 +836,35 @@ impl OllamaManager {
             std::fs::create_dir_all(&dir)
                 .map_err(|err| io_error(format!("cannot create {}", dir.display()), err))?;
         }
-        let port = pick_port(self.preferred_port(options))?;
-        let spec = LaunchSpec {
-            binary: binary.clone(),
-            host: "127.0.0.1".to_owned(),
-            port,
-            models_dir: self.layout.models_dir(),
-            home_dir: self.layout.home_dir(),
-            log_file: self.layout.log_file(),
+        // A free port can be taken by another process between choosing it and binding it, so a
+        // launch that fails with "address in use" is retried on a fresh port.
+        let mut preferred = self.preferred_port(options);
+        let mut attempts = 0;
+        let (pid, port) = loop {
+            let port = pick_port(preferred)?;
+            let spec = LaunchSpec {
+                binary: binary.clone(),
+                host: "127.0.0.1".to_owned(),
+                port,
+                models_dir: self.layout.models_dir(),
+                home_dir: self.layout.home_dir(),
+                log_file: self.layout.log_file(),
+                num_parallel: self.config.num_parallel,
+                context_tokens: self.config.context_tokens,
+            };
+            progress(ProvisionEvent::Step(format!(
+                "starting ollama serve on {}",
+                spec.ollama_host()
+            )));
+            match self.processes.spawn(&spec).await {
+                Ok(pid) => break (pid, port),
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse && attempts < 3 => {
+                    attempts += 1;
+                    preferred = 0;
+                }
+                Err(err) => return Err(ProvisionError::StartFailed(err.to_string())),
+            }
         };
-        progress(ProvisionEvent::Step(format!(
-            "starting ollama serve on {}",
-            spec.ollama_host()
-        )));
-        let pid = self
-            .processes
-            .spawn(&spec)
-            .await
-            .map_err(|err| ProvisionError::StartFailed(err.to_string()))?;
         let base_url = format!("http://127.0.0.1:{port}");
         state.server = Some(ServerRecord {
             pid,

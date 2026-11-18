@@ -1,8 +1,13 @@
 //! In-process sentence embeddings with Candle (cargo feature `embed-candle`).
 //!
 //! Runs a BERT-family encoder (default `sentence-transformers/all-MiniLM-L6-v2`) on the CPU:
-//! tokenise with truncation and batch padding, run the encoder, mean-pool the token states under
-//! the attention mask and L2-normalise, which is exactly the sentence-transformers recipe.
+//! tokenise with truncation and batch padding, run the encoder, pool the token states under the
+//! attention mask and L2-normalise, which is exactly the sentence-transformers recipe.
+//!
+//! Model families differ in how they were trained to be used, and [`recipe`] follows each one:
+//! sentence-transformers models mean-pool; BGE English models (`BAAI/bge-*-en*`) take the `[CLS]`
+//! state and prefix queries with their retrieval instruction; E5 models (`intfloat/*e5*`)
+//! mean-pool and prefix `query: ` and `passage: `.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,6 +35,56 @@ struct Inner {
     model: BertModel,
     tokenizer: Tokenizer,
     dimensions: usize,
+    recipe: Recipe,
+}
+
+/// How token states become one vector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pooling {
+    /// Mean of the real (unpadded) tokens' states.
+    Mean,
+    /// The first (`[CLS]`) token's state.
+    Cls,
+}
+
+/// How a model family expects to be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recipe {
+    /// Pooling of the token states.
+    pub pooling: Pooling,
+    /// Prepended to queries.
+    pub query_prefix: &'static str,
+    /// Prepended to stored text.
+    pub document_prefix: &'static str,
+}
+
+/// The recipe of a Hugging Face repository id; the sentence-transformers one when unknown.
+pub fn recipe(repo_id: &str) -> Recipe {
+    let id = repo_id.to_ascii_lowercase();
+    let (org, name) = id.split_once('/').unwrap_or(("", id.as_str()));
+    if org == "baai" && name.starts_with("bge-") {
+        Recipe {
+            pooling: Pooling::Cls,
+            query_prefix: if name.contains("-en") {
+                "Represent this sentence for searching relevant passages: "
+            } else {
+                ""
+            },
+            document_prefix: "",
+        }
+    } else if org == "intfloat" && name.contains("e5") {
+        Recipe {
+            pooling: Pooling::Mean,
+            query_prefix: "query: ",
+            document_prefix: "passage: ",
+        }
+    } else {
+        Recipe {
+            pooling: Pooling::Mean,
+            query_prefix: "",
+            document_prefix: "",
+        }
+    }
 }
 
 impl std::fmt::Debug for CandleEmbedder {
@@ -93,13 +148,21 @@ impl CandleEmbedder {
         let model = BertModel::load(builder, &config)
             .map_err(|err| model_error("weights do not match config.json", err))?;
 
+        let recipe = recipe(repo_id);
+        // Vectors pooled differently are not comparable: a non-default recipe gets its own id,
+        // so text embedded under another recipe is embedded again.
+        let model_id = match recipe.pooling {
+            Pooling::Mean => format!("candle:{repo_id}"),
+            Pooling::Cls => format!("candle:{repo_id}@cls"),
+        };
         Ok(Self {
             inner: Arc::new(Inner {
                 model,
                 tokenizer,
                 dimensions: config.hidden_size,
+                recipe,
             }),
-            model_id: format!("candle:{repo_id}"),
+            model_id,
             batch_size: batch_size.max(1),
         })
     }
@@ -160,24 +223,32 @@ impl Inner {
             ));
         }
 
-        // Mean pooling over real tokens only: padding must not influence a text's vector.
+        // Pooling over real tokens only: padding must not influence a text's vector.
         let mut vectors = Vec::with_capacity(rows);
         for row in 0..rows {
             let mut pooled = vec![0.0_f32; hidden];
-            let mut tokens = 0.0_f32;
-            for position in 0..length {
-                if mask[row * length + position] == 0 {
-                    continue;
+            match self.recipe.pooling {
+                Pooling::Cls => {
+                    let start = row * length * hidden;
+                    pooled.copy_from_slice(&states[start..start + hidden]);
                 }
-                tokens += 1.0;
-                let start = (row * length + position) * hidden;
-                for (sum, state) in pooled.iter_mut().zip(&states[start..start + hidden]) {
-                    *sum += state;
-                }
-            }
-            if tokens > 0.0 {
-                for value in &mut pooled {
-                    *value /= tokens;
+                Pooling::Mean => {
+                    let mut tokens = 0.0_f32;
+                    for position in 0..length {
+                        if mask[row * length + position] == 0 {
+                            continue;
+                        }
+                        tokens += 1.0;
+                        let start = (row * length + position) * hidden;
+                        for (sum, state) in pooled.iter_mut().zip(&states[start..start + hidden]) {
+                            *sum += state;
+                        }
+                    }
+                    if tokens > 0.0 {
+                        for value in &mut pooled {
+                            *value /= tokens;
+                        }
+                    }
                 }
             }
             if pooled.iter().any(|value| !value.is_finite()) {
@@ -203,12 +274,16 @@ impl Embedder for CandleEmbedder {
         self.inner.dimensions
     }
 
-    async fn embed(&self, texts: &[String], _kind: EmbedKind) -> Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String], kind: EmbedKind) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
         let inner = self.inner.clone();
-        let texts = texts.to_vec();
+        let prefix = match kind {
+            EmbedKind::Query => inner.recipe.query_prefix,
+            EmbedKind::Document => inner.recipe.document_prefix,
+        };
+        let texts: Vec<String> = texts.iter().map(|text| format!("{prefix}{text}")).collect();
         let batch_size = self.batch_size;
         tokio::task::spawn_blocking(move || inner.embed(&texts, batch_size)).await?
     }
@@ -344,6 +419,42 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn each_model_family_is_used_the_way_it_was_trained() {
+        let minilm = recipe("sentence-transformers/all-MiniLM-L6-v2");
+        assert_eq!(minilm.pooling, Pooling::Mean);
+        assert_eq!((minilm.query_prefix, minilm.document_prefix), ("", ""));
+        let bge = recipe("BAAI/bge-small-en-v1.5");
+        assert_eq!(bge.pooling, Pooling::Cls);
+        assert!(bge.query_prefix.starts_with("Represent this sentence"));
+        assert_eq!(bge.document_prefix, "");
+        assert_eq!(recipe("BAAI/bge-small-zh-v1.5").query_prefix, "");
+        let e5 = recipe("intfloat/e5-small-v2");
+        assert_eq!(
+            (e5.query_prefix, e5.document_prefix),
+            ("query: ", "passage: ")
+        );
+    }
+
+    #[tokio::test]
+    async fn cls_pooling_and_query_prefixes_change_the_vectors_and_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        tiny_model(dir.path());
+        let plain = CandleEmbedder::load(dir.path(), "test/tiny", 2).unwrap();
+        let bge = CandleEmbedder::load(dir.path(), "BAAI/bge-tiny-en", 2).unwrap();
+        assert_eq!(bge.model_id(), "candle:BAAI/bge-tiny-en@cls");
+        let text = texts(&["payment service refunds"]);
+        let mean = plain.embed(&text, EmbedKind::Document).await.unwrap();
+        let cls = bge.embed(&text, EmbedKind::Document).await.unwrap();
+        assert!(max_difference(&mean[0], &cls[0]) > 1e-3, "pooling differs");
+        // Same weights, same text: a query is embedded with the instruction, a document is not.
+        let query = bge.embed(&text, EmbedKind::Query).await.unwrap();
+        assert!(
+            max_difference(&query[0], &cls[0]) > 1e-3,
+            "query prefix applied"
         );
     }
 

@@ -11,13 +11,18 @@
 //! * Never call a `Db` method from inside a closure passed to another `Db` method: the in-memory
 //!   variant serves reads and writes from one connection behind one mutex and would deadlock.
 //! * Keep closures short. A write transaction holds the single writer.
+//! * [`Db::snapshot_read`] pins one connection to the calling thread for the duration of a
+//!   closure: every [`Db::read`] inside it sees the same database state. Writing from inside it is
+//!   an error rather than a deadlock.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use parking_lot::lock_api::ArcMutexGuard;
+use parking_lot::{Mutex, RawMutex};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 
 use super::time::now_ms;
@@ -45,9 +50,36 @@ pub struct MigrationSet {
 
 struct Inner {
     path: Option<PathBuf>,
-    writer: Mutex<Connection>,
-    readers: Vec<Mutex<Connection>>,
+    writer: Arc<Mutex<Connection>>,
+    readers: Vec<Arc<Mutex<Connection>>>,
     next_reader: AtomicUsize,
+}
+
+type PinnedConnection = ArcMutexGuard<RawMutex, Connection>;
+
+thread_local! {
+    /// Connections pinned by [`Db::snapshot_read`] on this thread, keyed by database identity.
+    static PINNED: RefCell<Vec<(usize, PinnedConnection)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Unpins the connection (ending its read transaction) when the snapshot scope ends, including
+/// by panic.
+struct Unpin(usize);
+
+impl Drop for Unpin {
+    fn drop(&mut self) {
+        let pinned = PINNED.with(|pinned| {
+            let mut pinned = pinned.borrow_mut();
+            let at = pinned.iter().rposition(|(id, _)| *id == self.0)?;
+            Some(pinned.remove(at).1)
+        });
+        if let Some(conn) = pinned
+            && !conn.is_autocommit()
+        {
+            // A read-only transaction has nothing to lose; ending it releases the snapshot.
+            let _ = conn.execute_batch("COMMIT;");
+        }
+    }
 }
 
 /// Cheaply cloneable handle to the Anchor database.
@@ -121,13 +153,13 @@ impl Db {
             reader.busy_timeout(Duration::from_secs(10))?;
             reader.execute_batch(READER_PRAGMAS)?;
             reader.set_prepared_statement_cache_capacity(128);
-            readers.push(Mutex::new(reader));
+            readers.push(Arc::new(Mutex::new(reader)));
         }
 
         Ok(Self {
             inner: Arc::new(Inner {
                 path: Some(path.to_path_buf()),
-                writer: Mutex::new(writer),
+                writer: Arc::new(Mutex::new(writer)),
                 readers,
                 next_reader: AtomicUsize::new(0),
             }),
@@ -148,15 +180,75 @@ impl Db {
         Ok(Self {
             inner: Arc::new(Inner {
                 path: None,
-                writer: Mutex::new(writer),
+                writer: Arc::new(Mutex::new(writer)),
                 readers: Vec::new(),
                 next_reader: AtomicUsize::new(0),
             }),
         })
     }
 
-    /// Runs a read-only closure on a pooled reader connection.
+    fn identity(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
+
+    /// `true` while the calling thread is inside [`Self::snapshot_read`] on this database.
+    pub fn is_pinned(&self) -> bool {
+        let id = self.identity();
+        PINNED.with(|pinned| pinned.borrow().iter().any(|(pin, _)| *pin == id))
+    }
+
+    fn refuse_write_when_pinned(&self) -> Result<()> {
+        if self.is_pinned() {
+            return Err(Error::other(
+                "a write was attempted inside a consistent read; finish the read first",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Runs `f` with one connection pinned to this thread inside a read transaction, so every
+    /// [`Self::read`] made by `f` (directly or through the graph store) sees one database state.
+    ///
+    /// The snapshot is taken by the first statement `f` executes, not on entry: a caller can take
+    /// other locks first and then read, and the snapshot is no older than those locks. Nested
+    /// calls reuse the outer snapshot. Writes from inside `f` are refused.
+    pub fn snapshot_read<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        if self.is_pinned() {
+            return f();
+        }
+        let conn: PinnedConnection = match self.inner.readers.as_slice() {
+            [] => self.inner.writer.lock_arc(),
+            readers => {
+                let start = self.inner.next_reader.fetch_add(1, Ordering::Relaxed);
+                (0..readers.len())
+                    .find_map(|offset| readers[(start + offset) % readers.len()].try_lock_arc())
+                    .unwrap_or_else(|| readers[start % readers.len()].lock_arc())
+            }
+        };
+        conn.execute_batch("BEGIN DEFERRED;")?;
+        let id = self.identity();
+        PINNED.with(|pinned| pinned.borrow_mut().push((id, conn)));
+        let _unpin = Unpin(id);
+        f()
+    }
+
+    /// Runs a read-only closure on a pooled reader connection (or on the pinned connection
+    /// inside [`Self::snapshot_read`]).
     pub fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let id = self.identity();
+        let mut f = Some(f);
+        let pinned = PINNED.with(|pinned| {
+            let pinned = pinned.borrow();
+            let (_, conn) = pinned.iter().rev().find(|(pin, _)| *pin == id)?;
+            let f = f.take()?;
+            Some(f(conn))
+        });
+        if let Some(result) = pinned {
+            return result;
+        }
+        let Some(f) = f else {
+            return Err(Error::other("pinned read lost its closure"));
+        };
         let readers = &self.inner.readers;
         if readers.is_empty() {
             let conn = self.inner.writer.lock();
@@ -174,6 +266,7 @@ impl Db {
 
     /// Runs a closure on the write connection without an explicit transaction.
     pub fn write<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+        self.refuse_write_when_pinned()?;
         let mut conn = self.inner.writer.lock();
         f(&mut conn)
     }
@@ -181,6 +274,7 @@ impl Db {
     /// Runs a closure inside an `IMMEDIATE` transaction on the write connection. The transaction
     /// commits when the closure returns `Ok` and rolls back when it returns `Err` or panics.
     pub fn transaction<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        self.refuse_write_when_pinned()?;
         let mut conn = self.inner.writer.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = f(&tx)?;
@@ -437,5 +531,77 @@ mod tests {
             .await
             .expect("read");
         assert_eq!(names, vec!["x"]);
+    }
+
+    #[test]
+    fn a_snapshot_read_does_not_see_writes_committed_after_it_started() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_with(dir.path().join("anchor.db"), &set(V1)).expect("open");
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO things (name) VALUES ('a')", [])?;
+            Ok(())
+        })
+        .expect("insert");
+        let other = db.clone();
+        let (first, second) = db
+            .snapshot_read(|| {
+                let first = count(&db);
+                // Another thread commits while the snapshot is open.
+                std::thread::spawn(move || {
+                    other
+                        .transaction(|tx| {
+                            tx.execute("INSERT INTO things (name) VALUES ('b')", [])?;
+                            Ok(())
+                        })
+                        .expect("insert");
+                })
+                .join()
+                .expect("writer");
+                Ok((first, count(&db)))
+            })
+            .expect("snapshot");
+        assert_eq!((first, second), (1, 1));
+        assert!(!db.is_pinned());
+        assert_eq!(count(&db), 2);
+    }
+
+    #[test]
+    fn snapshot_reads_nest_and_refuse_writes() {
+        let db = Db::open_in_memory_with(&set(V1)).expect("open");
+        let result = db.snapshot_read(|| {
+            assert!(db.is_pinned());
+            let nested = db.snapshot_read(|| Ok(count(&db)))?;
+            assert_eq!(nested, 0);
+            db.write(|conn| {
+                conn.execute("INSERT INTO things (name) VALUES ('no')", [])?;
+                Ok(())
+            })
+        });
+        assert!(result.is_err());
+        assert!(!db.is_pinned());
+        assert_eq!(count(&db), 0);
+        // The connection was released: writing works again.
+        db.write(|conn| {
+            conn.execute("INSERT INTO things (name) VALUES ('yes')", [])?;
+            Ok(())
+        })
+        .expect("write");
+        assert_eq!(count(&db), 1);
+    }
+
+    #[test]
+    fn a_panicking_snapshot_read_releases_its_connection() {
+        let db = Db::open_in_memory_with(&set(V1)).expect("open");
+        let inner = db.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<()> = inner.snapshot_read(|| panic!("boom"));
+        }));
+        assert!(outcome.is_err());
+        assert!(!db.is_pinned());
+        db.write(|conn| {
+            conn.execute("INSERT INTO things (name) VALUES ('after')", [])?;
+            Ok(())
+        })
+        .expect("write");
     }
 }
