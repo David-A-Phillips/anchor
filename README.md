@@ -115,14 +115,42 @@ graph syncs as signed deltas. [docs/hosting.md](docs/hosting.md)
 
 ## Benchmarks
 
-On a 100-repository synthetic organisation, Anchor's context held the answer to 99% of 735
-questions; on a 131-question sample, a reader model answered 85% correctly from it, against 49%
-from the best LlamaIndex configuration, using less than half the tokens. That corpus is
-synthetic and favours the questions Anchor targets. On the standard multi-hop benchmarks other
-graph-RAG systems report (MuSiQue, 2WikiMultiHopQA, HotpotQA: plain Wikipedia passages, no code
-or org chart), Anchor without a model links pages by the titles they name and averages 72.1
-recall@5, against 61.1 for BM25, 73.6 for HippoRAG and 87.1 for HippoRAG 2, both with a 70B model;
-it matches HippoRAG 2 on 2WikiMultiHopQA (91.0) and is weakest on MuSiQue (47.8). Method, numbers and caveats: [docs/benchmarks.md](docs/benchmarks.md).
+Two kinds, both reproducible from this repository ([docs/benchmarks.md](docs/benchmarks.md) has
+the method, every number and the caveats):
+
+**Anchor's own corpus**: a generated 100-repository organisation (code, `CODEOWNERS`, an org
+model, wikis, tickets, API approvals, reviews) with 735 questions whose answers are known. It
+measures what Anchor is built for, and it was built by this project, so it favours Anchor.
+
+| | Anchor | Best other (LlamaIndex hybrid) |
+|---|---|---|
+| Answer in the retrieved context | 99% | 89% |
+| A reader model (`llama3.1:8b`) answers correctly from it, 131-question sample | 84% | 49% |
+| Stale owner claim beaten by the authoritative one (12 questions) | 12 of 12 | 1 of 12 |
+| Tokens per question / query time | 1,287 / 4 ms | 3,100 / 30–50 ms |
+
+**Standard multi-hop benchmarks**: MuSiQue, 2WikiMultiHopQA and HotpotQA as released for HippoRAG 2
+(1,000 questions each over 6,000 to 11,700 Wikipedia passages), scored as graph-RAG papers score
+them. Not chosen by this project; three ranking constants were tuned on the first 300 questions
+of each, and the other 700 score the same. Recall@5, average of the three:
+
+| | Recall@5 |
+|---|---|
+| BM25 | 61.1 |
+| **Anchor, no model** | **72.1** |
+| HippoRAG (70B model) | 73.6 |
+| **Anchor + a small local embedding model** (`nomic-embed-text`; in-process `bge-small`: 75.0) | **75.3** |
+| NV-Embed-v2 (7B embedding model) | 80.2 |
+| HippoRAG 2 (70B model) | 87.1 |
+
+Without a model Anchor links pages by the titles they name and spreads relevance along those
+links: on 2WikiMultiHopQA it matches HippoRAG 2 (91.0 against 90.4); it is weakest on MuSiQue
+(47.8, 53.0 with embeddings), whose questions rarely use the passages' own names. A local 8B
+model naming each passage's entities added almost no links beyond the titles. Published rows are
+the HippoRAG 2 paper's; only BM25 was rerun here.
+
+**Change impact** on the same synthetic corpus: `anchor impact` finds 125 of 125 API consumers and
+names the right owner 129 of 129 times, in 0.3 ms per query.
 
 ## Status
 

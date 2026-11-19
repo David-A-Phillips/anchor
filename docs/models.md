@@ -103,7 +103,15 @@ retrieval instruction, and E5 models (`intfloat/*e5*`) prefix `query: ` and `pas
 
 With a neural model (Candle or Ollama), vector search is one of the rankings fused into the
 starting points of open questions (see [ARCHITECTURE.md](ARCHITECTURE.md#6-query-pipeline)).
-Hash vectors restate the full-text search, so they only add evidence at the end.
+Hash vectors restate the full-text search, so they only add evidence at the end. On the
+multi-hop benchmarks a neural model raises average recall@5 from 72.1 to 75.3 (`nomic-embed-text`)
+or, in-process with no model server, 75.0 (`BAAI/bge-small-en-v1.5`) and 74.2
+(`all-MiniLM-L6-v2`), mostly where questions and passages use different words
+([benchmarks](benchmarks.md#standard-multi-hop-benchmarks)).
+
+Changing the model is safe: the next `anchor ingest` (or the daemon) embeds every chunk that has
+no vector under the new model. A served model is asked for its vector length when Anchor starts;
+if it does not answer, Anchor uses hash vectors and logs a warning.
 
 To measure what they change, generate a question set with known answers and score it with and
 without a model configured:

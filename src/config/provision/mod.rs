@@ -731,7 +731,7 @@ impl OllamaManager {
         if options.verify {
             let verify_started = Instant::now();
             progress(ProvisionEvent::Step(format!(
-                "checking {model} with a short generation"
+                "checking {model} with a short generation (or embedding)"
             )));
             report.verification = Some(
                 self.verify_at(&report.base_url, &model, options.verify_timeout)
@@ -1167,12 +1167,40 @@ impl OllamaManager {
             ..GenerateRequest::default()
         };
         let started = Instant::now();
-        let response = api.generate(&request, Some(timeout)).await.map_err(|err| {
-            ProvisionError::VerifyFailed {
-                model: model.to_owned(),
-                reason: err.to_string(),
+        let response = match api.generate(&request, Some(timeout)).await {
+            Ok(response) => response,
+            // An embedding model cannot generate: check that it embeds instead.
+            Err(err) if err.to_string().contains("does not support generate") => {
+                let embedded = api
+                    .embed(model, &["ready".to_owned()], Some(timeout))
+                    .await
+                    .map_err(|err| ProvisionError::VerifyFailed {
+                        model: model.to_owned(),
+                        reason: err.to_string(),
+                    })?;
+                let dimensions = embedded.embeddings.first().map_or(0, Vec::len);
+                if dimensions == 0 {
+                    return Err(ProvisionError::VerifyFailed {
+                        model: model.to_owned(),
+                        reason: "the embedding model returned an empty vector".to_owned(),
+                    });
+                }
+                return Ok(VerifyReport {
+                    model: model.to_owned(),
+                    base_url: base_url.to_owned(),
+                    latency_ms: elapsed_ms(started),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    response: format!("embedding of {dimensions} dimensions"),
+                });
             }
-        })?;
+            Err(err) => {
+                return Err(ProvisionError::VerifyFailed {
+                    model: model.to_owned(),
+                    reason: err.to_string(),
+                });
+            }
+        };
         let completion_tokens = response.eval_count.unwrap_or(0);
         if completion_tokens == 0 && response.response.trim().is_empty() {
             return Err(ProvisionError::VerifyFailed {

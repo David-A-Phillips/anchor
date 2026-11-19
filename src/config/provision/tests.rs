@@ -631,6 +631,19 @@ async fn verify_reports_latency_and_tokens_and_failures() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn an_embedding_model_is_verified_by_embedding() -> TestResult {
+    let rig = TestRig::new().await?;
+    let options = ProvisionOptions {
+        model: Some("nomic-embed-text".to_owned()),
+        ..rig.options.clone()
+    };
+    let report = rig.manager.ensure_ready(&options, &no_progress).await?;
+    let verified = report.verification.expect("verified");
+    assert_eq!(verified.response, "embedding of 4 dimensions");
+    Ok(())
+}
+
 /// Real end-to-end test against the official Ollama build. Run with
 /// `ANCHOR_E2E_OLLAMA=1 cargo test --all-features e2e_real_ollama -- --ignored --nocapture`.
 /// Environment: `ANCHOR_E2E_OLLAMA_MODEL` (default `smollm2:135m`), `ANCHOR_E2E_OLLAMA_PORT`.

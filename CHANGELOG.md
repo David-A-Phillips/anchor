@@ -48,7 +48,8 @@
   a neural embedding model) vector results are merged by reciprocal rank fusion, and the best
   candidates pass relevance along their links; a node name counts only when the question contains
   it whole. Questions seeking an owner, dependency or other answer kind are ranked as before.
-  Average recall@5 on MuSiQue, 2WikiMultiHopQA and HotpotQA: 59.4 to 72.1 (BM25 61.1).
+  Average recall@5 on MuSiQue, 2WikiMultiHopQA and HotpotQA: 59.4 to 72.1 (BM25 61.1), and 75.3
+  with `nomic-embed-text` embeddings.
 - **`anchor enrich --links-only`**: the model only names what each text refers to, about a quarter
   of the output of a full pass. Names the model gives now also link to wiki pages, and up to
   eight calls run at once.
@@ -72,6 +73,14 @@
   24 GB GPU holds.
 - **Re-ingesting reports only what changed**: unchanged files no longer count as applied units,
   and the title-link pass is skipped when no page changed.
+- **Ollama embeddings are used.** `[embeddings] backend = "ollama"` silently fell back to hash
+  vectors, because the model's vector length is only known after a first call; the engine now
+  asks the model at start-up (and falls back, with a warning, only when it does not answer).
+- **Switching embedding models re-embeds the corpus**: the first embedding pass of a process
+  queues every chunk without a vector under the current model. Before, only text written after
+  the switch was embedded and vector search over the rest returned nothing.
+- **`anchor ollama provision --model <embedding model>`** no longer fails its check: an embedding
+  model is verified with an embedding instead of a generation.
 - **Interrupted enrichment keeps its work**: results are saved every 128 nodes, and the next run
   skips them.
 - **The install script works**: it refused its own default repository, and could not find a

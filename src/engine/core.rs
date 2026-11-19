@@ -150,6 +150,9 @@ pub struct Engine {
     backlog: Arc<Backlog>,
     events: broadcast::Sender<EngineEvent>,
     pending_chunks: Mutex<Vec<ChunkId>>,
+    /// Set once chunks without a vector under the current model have been queued (see
+    /// [`Self::embed_pending`]).
+    backfill_queued: std::sync::atomic::AtomicBool,
     /// Nodes whose node row or text changed since the last title-link pass (wiki pages among
     /// them are relinked after a watcher rescan).
     touched_nodes: Mutex<BTreeSet<crate::base::NodeId>>,
@@ -216,7 +219,18 @@ impl Engine {
         };
         let embedder = match build_embedder(&config.embeddings, &paths, &config.ollama) {
             Ok(embedder) if embedder.dimensions() > 0 => embedder,
-            Ok(_) => fallback()?,
+            // A served model (Ollama) reports its vector length only after a first call: ask it
+            // now, so the vector index is opened for its vectors rather than the hash fallback's.
+            Ok(embedder) => match probe_dimensions(embedder.clone()) {
+                Ok(_) => embedder,
+                Err(err) => {
+                    tracing::warn!(
+                        "embedding model {} did not answer ({err}); using the hash embedder",
+                        embedder.model_id()
+                    );
+                    fallback()?
+                }
+            },
             Err(err) => {
                 tracing::warn!("embedding backend unavailable ({err}); using the hash embedder");
                 fallback()?
@@ -253,6 +267,7 @@ impl Engine {
             backlog,
             events,
             pending_chunks: Mutex::new(Vec::new()),
+            backfill_queued: std::sync::atomic::AtomicBool::new(false),
             touched_nodes: Mutex::new(BTreeSet::new()),
             latencies: Mutex::new(Vec::new()),
             ownership: Mutex::new(HashMap::new()),
@@ -561,7 +576,45 @@ impl Engine {
 
     /// Embeds chunks created since the last call. Run it off the hot path (after scans, or from
     /// a background task); returns the number of chunks embedded.
+    ///
+    /// The first call in a process also queues every chunk that has no vector under the current
+    /// embedding model (written before the model was configured or changed, or by another
+    /// device), so switching models re-embeds the corpus.
     pub async fn embed_pending(&self) -> Result<usize> {
+        if !self
+            .backfill_queued
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let store = self.store.clone();
+            let vectors = self.vectors.clone();
+            let embed_code = self.config.embeddings.embed_code;
+            let missing = tokio::task::spawn_blocking(move || -> Result<Vec<ChunkId>> {
+                let mut missing = Vec::new();
+                let mut cursor = ChunkId(0);
+                loop {
+                    let page = store.chunks_after(cursor, 2_000)?;
+                    let Some(last) = page.last() else { break };
+                    cursor = last.id;
+                    missing.extend(
+                        page.iter()
+                            .filter(|chunk| {
+                                (embed_code || chunk.kind != crate::base::ChunkKind::Code)
+                                    && !chunk.text.trim().is_empty()
+                                    && !vectors.contains(chunk.id, &chunk.hash)
+                            })
+                            .map(|chunk| chunk.id),
+                    );
+                }
+                Ok(missing)
+            })
+            .await??;
+            if !missing.is_empty() {
+                let mut pending = self.pending_chunks.lock();
+                pending.extend(missing);
+                pending.sort_unstable();
+                pending.dedup();
+            }
+        }
         let ids: Vec<ChunkId> = std::mem::take(&mut *self.pending_chunks.lock());
         if ids.is_empty() {
             return Ok(0);
@@ -1315,6 +1368,26 @@ impl Engine {
         }
         self.ledger.flush()
     }
+}
+
+/// Asks `embedder` for its vector length with one short text, on a thread of its own so that it
+/// works whether or not the caller is inside an async runtime. Gives up after ten seconds.
+fn probe_dimensions(embedder: Arc<dyn Embedder>) -> Result<usize> {
+    std::thread::spawn(move || -> Result<usize> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                super::embed::resolve_dimensions(embedder.as_ref()),
+            )
+            .await
+            .map_err(|_| crate::base::Error::other("no answer within 10 s"))?
+        })
+    })
+    .join()
+    .map_err(|_| crate::base::Error::other("the dimension probe panicked"))?
 }
 
 #[cfg(test)]

@@ -105,6 +105,7 @@ impl FakeOllama {
             .route("/api/pull", post(pull))
             .route("/api/delete", delete(delete_model))
             .route("/api/generate", post(generate))
+            .route("/api/embed", post(embed))
             .with_state(state.clone());
         let shutdown = CancellationToken::new();
         let token = shutdown.clone();
@@ -251,12 +252,34 @@ async fn generate(State(state): State<Arc<FakeOllamaState>>, body: axum::Json<Va
         )
             .into_response();
     }
+    if model.contains("embed") {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": format!("\"{model}\" does not support generate") })),
+        )
+            .into_response();
+    }
     state.generates.fetch_add(1, Ordering::SeqCst);
     axum::Json(json!({
         "model": model, "response": "ready", "done": true, "done_reason": "stop",
         "prompt_eval_count": 7, "eval_count": 2, "total_duration": 1_000_000
     }))
     .into_response()
+}
+
+/// Embedding models (any name containing "embed") answer with one 4-dimensional vector per input.
+async fn embed(State(state): State<Arc<FakeOllamaState>>, body: axum::Json<Value>) -> Response {
+    let model = body["model"].as_str().unwrap_or_default().to_owned();
+    if !lock(&state.models).iter().any(|m| same_model(m, &model)) || !model.contains("embed") {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": format!("\"{model}\" does not support embeddings") })),
+        )
+            .into_response();
+    }
+    let inputs = body["input"].as_array().map_or(1, Vec::len);
+    axum::Json(json!({ "model": model, "embeddings": vec![vec![0.5, 0.5, 0.5, 0.5]; inputs] }))
+        .into_response()
 }
 
 #[derive(Default)]

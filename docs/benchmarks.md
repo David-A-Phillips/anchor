@@ -22,7 +22,7 @@ system's retrieved context, on a 131-question sample.
 
 | System | Answer in retrieved context | Reader answers correctly | Tokens per question | Query time |
 |---|---|---|---|---|
-| **Anchor** | **0.99** | **0.85**\* | 1,287 | 4 ms |
+| **Anchor** | **0.99** | **0.84** | 1,287 | 4 ms |
 | LlamaIndex hybrid (vector + BM25) | 0.89 | 0.49 | 3,100 | 30–50 ms |
 | LlamaIndex BM25 | 0.85 | 0.44 | 3,646 | 0.6 ms |
 | LlamaIndex vector | 0.64 | 0.41 | 2,125 | 30–75 ms |
@@ -34,16 +34,14 @@ system's retrieved context, on a 131-question sample.
 
 | System | Index on disk | Peak memory | Indexing time |
 |---|---|---|---|
-| **Anchor** | 12.7 MB | 164 MB | 1.1 s |
+| **Anchor** | 12.7 MB | 171 MB | 1.1 s |
 | LangChain (FAISS + BM25) | 8.7 MB | 200 MB | 24–43 s |
 | LlamaIndex (vector + BM25) | 16.5 MB | 323 MB | 18–27 s |
 | LightRAG | 54.3 MB | 1,067 MB | about 1 h 40 min |
 
-\* Retrieval figures, footprint and query times were rerun for 0.1.2. The reader-model figures
-for Anchor are from the 0.1.1 run: 0.1.2 labels an ownership question's secondary candidates (the
-team owning the enclosing component, the domain lead) as evidence instead of answers, which
-changed Anchor's context text for 40 of the 131 sample questions, and the shared reader has not
-been rerun on them yet. The other systems' contexts did not change.
+Every figure for Anchor is from 0.1.2, the reader's included: the 68 sample questions whose
+context changed since 0.1.1 were answered again (the other systems' contexts did not change, and
+the reader runs at temperature 0). Peak memory varies between runs, from 160 to 190 MB.
 
 The LangChain, LlamaIndex and LightRAG rows leave out the models they call, which run in a
 separate Ollama server: the embedding model (`nomic-embed-text`, 274 MB on disk) for all three,
@@ -57,7 +55,7 @@ answers from the graph with no model at all, over all questions of that type):
 
 | Question type | Questions (sample) | Anchor | Anchor direct | LlamaIndex hybrid | LangChain hybrid | LightRAG |
 |---|---|---|---|---|---|---|
-| Ownership ("who owns X?") | 279 (41) | 0.88 | 0.97 | 0.32 | 0.37 | 0.15 |
+| Ownership ("who owns X?") | 279 (41) | 0.85 | 0.97 | 0.32 | 0.37 | 0.15 |
 | Justification ("why was X blocked / dismissed?") | 95 (30) | 0.80 | 1.00 | 0.60 | 0.50 | 0.33 |
 | Relationships (multi-hop) | 283 (30) | 1.00 | 1.00 | 0.60 | 0.30 | 0.20 |
 | Prose ("how do I ...", half paraphrased) | 78 (30) | 0.70 | none | 0.50 | 0.53 | 0.67 |
@@ -225,13 +223,19 @@ it:
 | Prose questions added (78), before changes | 0.85 on prose | none |
 | After quoting documentation pages for the named entity | 0.99 on prose | none |
 | 0.1.2: secondary ownership candidates labelled as evidence | 0.99 (unchanged) | unchanged |
+| 0.1.2: fused ranking and title links for open questions | 0.99 (unchanged) | unchanged |
 
 A second corpus generated with a different seed and never inspected during that work scores the
 same (0.99 / 0.98 on the first three question types).
 
 The 0.1.2 relabelling raised the share of answer-labelled items that are correct owners in the
 key-based test (`tests/e2e.rs`) from 0.23 to 0.91, with recall unchanged at 1.00. It does not
-move the text-based scores above, which look for the answer anywhere in the context.
+move the text-based scores above, which look for the answer anywhere in the context. It does
+change what the reader is shown for ownership questions: with fewer owner names in the context,
+the reader's ownership score went from 0.88 to 0.85 (0.85 to 0.84 overall), while Anchor's own
+answer stayed at 0.97. The ranking changes that lifted the multi-hop benchmarks below apply only
+to open questions on corpora with links between pages; on this corpus every context and every
+answer is identical with and without them.
 
 **System 1 enrichment** (summaries, tags and "questions this text answers", written at ingestion
 by `llama3.2:3b`) made no measurable difference: enriching all 276 pages, tickets, pull requests
@@ -370,11 +374,35 @@ full-text search. Two changes, each measured on its own:
 Questions about owners, dependencies and the other answer kinds keep their previous seeding; on
 the synthetic benchmark above every context and every answer is identical before and after.
 
-**Models.** A local model can also find the links: with `llama3.1:8b` naming the entities each
-passage refers to (`anchor enrich`), 2WikiMultiHopQA recall@5 rose from 66.7 to 78.2 under the
-0.1.1 ranking. Keeping the model's summaries but deleting its links gave 66.0, so the links did
-all of it; on that dataset exact titles find as many. Runs with model links, a neural embedding
-model and both on all three datasets, under the new ranking, are prepared but not yet run.
+**With local models.** Two ways a model can help, each run on all three datasets with the
+ranking and title links above, on one RTX 3090 Ti:
+
+| Configuration | MuSiQue | 2Wiki | HotpotQA | Average |
+|---|---|---|---|---|
+| No model (default) | 35.3 / 47.8 | 70.0 / 91.0 | 59.9 / 77.6 | 55.1 / 72.1 |
+| + `nomic-embed-text` embeddings (Ollama, 274 MB) | 38.0 / 53.0 | 70.1 / 91.0 | 63.7 / 81.8 | **57.3 / 75.3** |
+| + `bge-small-en-v1.5` embeddings (in-process, CPU, 127 MB) | 38.2 / 52.8 | 69.9 / 90.5 | 62.1 / 81.7 | 56.7 / 75.0 |
+| + `all-MiniLM-L6-v2` embeddings (in-process, CPU, 87 MB, the Candle default) | 37.2 / 53.2 | 68.0 / 90.2 | 59.9 / 79.3 | 55.0 / 74.2 |
+| + `llama3.1:8b` links (`anchor enrich --links-only`) | 34.9 / 47.8 | 69.0 / 90.8 | 59.8 / 77.5 | 54.6 / 72.0 |
+| + both | 37.2 / 52.8 | 69.8 / 90.9 | 63.5 / 81.7 | 56.8 / 75.1 |
+
+- **Embeddings help where the words differ.** Fused into the ranking, a small embedding model
+  adds 5.2 points of recall@5 on MuSiQue and 4.2 on HotpotQA, and nothing on 2WikiMultiHopQA,
+  whose questions name the pages they need. Embedding the 27,500 passages took about four and a half
+  minutes on the GPU; each question adds about 15 ms for embedding it. The average (75.3) is above
+  HippoRAG's (73.6) and below NV-Embed-v2 (80.2), a 7B embedding model, and HippoRAG 2 (87.1).
+  The in-process models need no model server: `bge-small-en-v1.5` (pooled and prompted as it was
+  trained, see [models.md](models.md#embeddings)) matches the served model (75.0), MiniLM gets
+  most of the way (74.2). On the CPU they embed four (bge) to eight (MiniLM) passages a second,
+  one to two hours for the three corpora, and a question takes about 80 ms instead of 18.
+- **Model links add nothing here.** The model named what each passage refers to in 0.29 s per
+  passage (2 h 10 min for all three corpora; 1.7 to 4.6% of its replies were unusable), but its
+  names become links only when they match a page's name, and almost all of them match the
+  titles the free title pass already links: it added 109, 232 and 278 links to the 2,120, 4,867
+  and 13,270 already there. Earlier, without title links and under the 0.1.1 ranking, the same
+  kind of model links lifted 2WikiMultiHopQA recall@5 from 66.7 to 78.2, and deleting the links
+  while keeping the model's summaries gave 66.0, so links were what mattered; title links now
+  provide them without a model.
 
 **Method.** `scripts/bench/multihop.py` writes each passage to a Markdown file (`# title`, then
 the text), ingests them as one wiki source with the default configuration and no model, and asks
